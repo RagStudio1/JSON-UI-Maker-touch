@@ -23,9 +23,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v47-selected-resize-handle";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v48-mobile-floating-actions";
 
-    const BUILD = "v47-selected-resize-handle";
+    const BUILD = "v48-mobile-floating-actions";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -10117,6 +10117,159 @@
         );
     }
 
+    function installMobileFloatingActions(mods) {
+        if (
+            document.querySelector(
+                ".rag-mobile-floating-actions"
+            )
+        ) {
+            return;
+        }
+
+        const mobile =
+            hasTouch ||
+            window.matchMedia?.("(max-width: 900px)").matches;
+
+        if (!mobile) return;
+
+        const toolbar = document.createElement("nav");
+        toolbar.className = "rag-mobile-floating-actions";
+        toolbar.setAttribute("aria-label", "Acoes rapidas do editor");
+
+        const actions = [
+            ["copy", "⧉", "Copiar"],
+            ["paste", "▣", "Colar"],
+            ["delete", "⌫", "Apagar"],
+            ["undo", "↶", "Desfazer"],
+            ["redo", "↷", "Refazer"],
+        ];
+
+        const buttons = new Map();
+
+        for (const [action, icon, label] of actions) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "rag-mobile-floating-action";
+            button.dataset.action = action;
+            button.setAttribute("aria-label", label);
+            button.title = label;
+
+            const iconElement = document.createElement("span");
+            iconElement.className = "rag-mobile-floating-icon";
+            iconElement.textContent = icon;
+
+            const labelElement = document.createElement("small");
+            labelElement.textContent = label;
+
+            button.append(iconElement, labelElement);
+            toolbar.appendChild(button);
+            buttons.set(action, button);
+        }
+
+        document.body.appendChild(toolbar);
+
+        const sync = () => {
+            const selected = mods.index.selectedElement;
+            const selectedInstance = selected?.dataset?.id
+                ? mods.index.GLOBAL_ELEMENT_MAP.get(
+                    selected.dataset.id
+                )
+                : null;
+            const manager = mods.undoRedoManager;
+
+            const copyButton = buttons.get("copy");
+            const pasteButton = buttons.get("paste");
+            const deleteButton = buttons.get("delete");
+            const undoButton = buttons.get("undo");
+            const redoButton = buttons.get("redo");
+
+            if (copyButton) copyButton.disabled = !selected?.dataset?.id;
+            if (pasteButton) pasteButton.disabled = !mods.index.copiedElementData;
+            if (deleteButton) {
+                deleteButton.disabled = !(
+                    selectedInstance &&
+                    selectedInstance.deleteable !== false
+                );
+            }
+            if (undoButton) undoButton.disabled = !manager?.canUndo?.();
+            if (redoButton) redoButton.disabled = !manager?.canRedo?.();
+        };
+
+        const desktopButton = (index) =>
+            document.querySelector(
+                `.rag-copy-paste-tools button:nth-child(${index})`
+            );
+
+        buttons.get("copy")?.addEventListener("click", () => {
+            desktopButton(1)?.click();
+            sync();
+        });
+
+        buttons.get("paste")?.addEventListener("click", () => {
+            desktopButton(2)?.click();
+            setTimeout(sync, 0);
+        });
+
+        buttons.get("delete")?.addEventListener("click", () => {
+            if (!mods.index.selectedElement) return;
+
+            mods.index.Builder.deleteSelected();
+            showBanner("Elemento apagado.", "success");
+            setTimeout(sync, 0);
+        });
+
+        buttons.get("undo")?.addEventListener("click", () => {
+            mods.index.Builder.undo();
+            setTimeout(sync, 0);
+        });
+
+        buttons.get("redo")?.addEventListener("click", () => {
+            mods.index.Builder.redo();
+            setTimeout(sync, 0);
+        });
+
+        const shared = mods.ElementSharedFuncs;
+        const originalSelect = shared?.select;
+        const originalUnselect = shared?.unSelect;
+
+        if (shared && !shared.__ragMobileFloatingSelectionV48) {
+            shared.__ragMobileFloatingSelectionV48 = true;
+
+            shared.select = function (event, classElement) {
+                const result = originalSelect.call(
+                    this,
+                    event,
+                    classElement
+                );
+                sync();
+                return result;
+            };
+
+            shared.unSelect = function (classElement) {
+                const result = originalUnselect.call(
+                    this,
+                    classElement
+                );
+                sync();
+                return result;
+            };
+        }
+
+        const manager = mods.undoRedoManager;
+        if (manager && !manager.__ragMobileFloatingUiV48) {
+            manager.__ragMobileFloatingUiV48 = true;
+            const originalUpdateUi = manager.updateUI;
+
+            manager.updateUI = function () {
+                const result = originalUpdateUi.call(this);
+                sync();
+                return result;
+            };
+        }
+
+        sync();
+    }
+
     function pathDirectory(
         path
     ) {
@@ -17665,6 +17818,91 @@
     font-weight: 900;
 }
 
+.rag-mobile-floating-actions {
+    position: fixed !important;
+    right: max(10px, env(safe-area-inset-right)) !important;
+    bottom: max(10px, env(safe-area-inset-bottom)) !important;
+    z-index: 900000 !important;
+    display: none;
+    align-items: stretch;
+    gap: 5px;
+    padding: 5px;
+    border: 1px solid rgba(190, 122, 255, .72);
+    border-radius: 13px;
+    background: rgba(21, 21, 27, .94);
+    box-shadow: 0 5px 24px rgba(0, 0, 0, .65);
+    backdrop-filter: blur(8px);
+    pointer-events: auto;
+    touch-action: manipulation;
+}
+
+.rag-mobile-floating-action {
+    display: flex;
+    flex: 0 0 52px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-width: 52px;
+    min-height: 50px;
+    padding: 4px 3px;
+    border: 1px solid rgba(255, 255, 255, .16);
+    border-radius: 9px;
+    background: linear-gradient(145deg, #383443, #25232d);
+    color: #fff;
+    cursor: pointer;
+    font: 800 9px/1.05 sans-serif;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.rag-mobile-floating-action:active:not(:disabled) {
+    transform: translateY(1px) scale(.96);
+    background: linear-gradient(145deg, #7041a2, #432b6f);
+}
+
+.rag-mobile-floating-action:disabled {
+    cursor: not-allowed;
+    opacity: .36;
+}
+
+.rag-mobile-floating-icon {
+    display: block;
+    margin-bottom: 3px;
+    color: #dbaaff;
+    font-size: 22px;
+    line-height: 21px;
+}
+
+.rag-mobile-floating-action small {
+    font-size: 8px;
+    white-space: nowrap;
+}
+
+@media (pointer: coarse), (max-width: 900px) {
+    .rag-mobile-floating-actions {
+        display: flex;
+    }
+}
+
+@media (max-width: 430px) {
+    .rag-mobile-floating-actions {
+        right: max(6px, env(safe-area-inset-right)) !important;
+        bottom: max(6px, env(safe-area-inset-bottom)) !important;
+        gap: 3px;
+        padding: 4px;
+    }
+
+    .rag-mobile-floating-action {
+        flex-basis: 45px;
+        min-width: 45px;
+        min-height: 46px;
+    }
+
+    .rag-mobile-floating-icon {
+        font-size: 19px;
+    }
+}
+
 .rag-v23-elements {
     display: flex;
     flex-direction: column;
@@ -18479,6 +18717,7 @@
         patchSafeRebuildDeletion(mods);
 
         installCopyPasteButtons(mods);
+        installMobileFloatingActions(mods);
         installExpandedSidebar(mods);
         installScreenshotRebuilder(mods);
         installExplorerDock(mods);
