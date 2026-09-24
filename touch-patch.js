@@ -23,9 +23,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v48-mobile-floating-actions";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v49-viewport-floating-actions";
 
-    const BUILD = "v48-mobile-floating-actions";
+    const BUILD = "v49-viewport-floating-actions";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -10134,6 +10134,7 @@
 
         const toolbar = document.createElement("nav");
         toolbar.className = "rag-mobile-floating-actions";
+        toolbar.setAttribute("data-rag-viewport-layer", "true");
         toolbar.setAttribute("aria-label", "Acoes rapidas do editor");
 
         const actions = [
@@ -10166,7 +10167,36 @@
             buttons.set(action, button);
         }
 
-        document.body.appendChild(toolbar);
+        // Keep the toolbar outside the editor's flex/scroll layout. It must
+        // belong to the viewport, not to the long page below the preview.
+        document.documentElement.appendChild(toolbar);
+
+        const syncViewportScale = () => {
+            const visualScale = Number(
+                window.visualViewport?.scale
+            ) || 1;
+            const inverseScale = Math.max(
+                0.75,
+                Math.min(3, 1 / visualScale)
+            );
+
+            toolbar.style.setProperty(
+                "--rag-floating-inverse-scale",
+                String(inverseScale)
+            );
+        };
+
+        syncViewportScale();
+        window.visualViewport?.addEventListener(
+            "resize",
+            syncViewportScale,
+            { passive: true }
+        );
+        window.visualViewport?.addEventListener(
+            "scroll",
+            syncViewportScale,
+            { passive: true }
+        );
 
         const sync = () => {
             const selected = mods.index.selectedElement;
@@ -17821,9 +17851,11 @@
 .rag-mobile-floating-actions {
     position: fixed !important;
     right: max(10px, env(safe-area-inset-right)) !important;
-    bottom: max(10px, env(safe-area-inset-bottom)) !important;
+    top: 50% !important;
+    bottom: auto !important;
     z-index: 900000 !important;
     display: none;
+    flex-direction: column;
     align-items: stretch;
     gap: 5px;
     padding: 5px;
@@ -17834,6 +17866,8 @@
     backdrop-filter: blur(8px);
     pointer-events: auto;
     touch-action: manipulation;
+    transform: translateY(-50%) scale(var(--rag-floating-inverse-scale, 1));
+    transform-origin: right center;
 }
 
 .rag-mobile-floating-action {
@@ -17887,7 +17921,7 @@
 @media (max-width: 430px) {
     .rag-mobile-floating-actions {
         right: max(6px, env(safe-area-inset-right)) !important;
-        bottom: max(6px, env(safe-area-inset-bottom)) !important;
+        top: 50% !important;
         gap: 3px;
         padding: 4px;
     }
