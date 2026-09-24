@@ -23,9 +23,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v46-complete-ui-package";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v47-selected-resize-handle";
 
-    const BUILD = "v46-complete-ui-package";
+    const BUILD = "v47-selected-resize-handle";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -568,6 +568,59 @@
 
             return originalStartDrag.call(this, event, classElement);
         };
+    }
+
+    // Keep resize handles out of the canvas until their own item is selected.
+    // The marker is placed on the main element, so selecting a parent never
+    // reveals the handles of nested children.
+    function patchSelectedResizeHandleVisibility(mods) {
+        const shared = mods.ElementSharedFuncs;
+
+        if (!shared || shared.__ragSelectedResizeHandleV47) return;
+        shared.__ragSelectedResizeHandleV47 = true;
+
+        const originalSelect = shared.select;
+        const originalUnselect = shared.unSelect;
+
+        const sync = () => {
+            for (const element of document.querySelectorAll(
+                ".rag-resize-selected"
+            )) {
+                element.classList.remove("rag-resize-selected");
+            }
+
+            const selected = mods.index.selectedElement;
+            if (!(selected instanceof HTMLElement) || !selected.isConnected) {
+                return;
+            }
+
+            const instance = mods.index.GLOBAL_ELEMENT_MAP.get(
+                selected.dataset.id
+            );
+
+            if (
+                instance?.selected &&
+                instance?.resizeHandle instanceof HTMLElement &&
+                instance.resizeHandle.parentElement === selected
+            ) {
+                selected.classList.add("rag-resize-selected");
+            }
+        };
+
+        shared.select = function (event, classElement) {
+            const result = originalSelect.call(this, event, classElement);
+            sync();
+            return result;
+        };
+
+        shared.unSelect = function (classElement) {
+            const result = originalUnselect.call(this, classElement);
+            sync();
+            return result;
+        };
+
+        sync();
+        window.__RAG_SYNC_RESIZE_HANDLE_V47__ = sync;
     }
 
     // ============================================================
@@ -18296,6 +18349,20 @@
     pointer-events: none !important;
     z-index: 2147481000 !important;
 }
+
+/* Resize affordances belong only to the active item. Direct-child matching is
+   intentional: a selected panel must not reveal every nested image handle. */
+#main_window .resize-handle {
+    display: none !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+}
+
+#main_window .rag-resize-selected > .resize-handle {
+    display: block !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
+}
 `;
         document.head.appendChild(style);
     }
@@ -18403,6 +18470,7 @@
         patchAdvancedControlExport(mods);
         patchNativeRoundTrip(mods);
         patchSelectedItemDragLock(mods);
+        patchSelectedResizeHandleVisibility(mods);
         patchNestedPanelDrag(mods);
         patchCopyPasteMetadata(mods);
         patchCopyPasteAutoChrome(mods);
