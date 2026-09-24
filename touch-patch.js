@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v31-roundtrip-import-fix";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v32-selected-drag-lock";
 
-    const BUILD = "v31-roundtrip-import-fix";
+    const BUILD = "v32-selected-drag-lock";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -515,6 +515,53 @@
             childList: true,
             subtree: true,
         });
+    }
+
+    // Prevent an unrelated element from moving while another item is selected.
+    // Selection still changes normally through dblclick/tap; only drag start is
+    // rejected until the target becomes the active selection.
+    function patchSelectedItemDragLock(mods) {
+        const shared = mods.ElementSharedFuncs;
+
+        if (!shared || shared.__ragSelectedDragLockV32) return;
+        shared.__ragSelectedDragLockV32 = true;
+
+        const originalStartDrag = shared.startDrag;
+        let lastWarning = 0;
+
+        shared.startDrag = function (event, classElement) {
+            const selected = mods.index.selectedElement;
+            const target = classElement?.getMainHTMLElement?.();
+
+            if (
+                selected instanceof HTMLElement &&
+                selected.isConnected &&
+                target instanceof HTMLElement &&
+                selected !== target
+            ) {
+                classElement.isDragging = false;
+                event?.preventDefault?.();
+                event?.stopPropagation?.();
+
+                queueMicrotask(() => {
+                    if (classElement.centerCircle) {
+                        classElement.centerCircle.style.display = "none";
+                    }
+                });
+
+                if (Date.now() - lastWarning > 1200) {
+                    lastWarning = Date.now();
+                    showBanner(
+                        "Selecione este item antes de mover.",
+                        "normal"
+                    );
+                }
+
+                return false;
+            }
+
+            return originalStartDrag.call(this, event, classElement);
+        };
     }
 
     // ============================================================
@@ -11609,6 +11656,7 @@
         patchClipsChildrenExport(mods);
         patchAdvancedControlExport(mods);
         patchNativeRoundTrip(mods);
+        patchSelectedItemDragLock(mods);
         patchNestedPanelDrag(mods);
         patchPanelLock(mods);
         patchCopyPasteMetadata(mods);

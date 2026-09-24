@@ -1,5 +1,11 @@
-JSON-UI-Maker Patch v31
-Build: v31-roundtrip-import-fix
+JSON-UI-Maker Patch v32
+Build: v32-selected-drag-lock
+
+SELECTION DRAG LOCK:
+- somente o item atualmente selecionado pode ser movido
+- arrastar outro item enquanto existe uma selecao nao altera sua posicao
+- toque/clique continua permitindo selecionar outro item normalmente
+- evita movimentos acidentais em paineis com elementos sobrepostos
 
 EXPORTAR / IMPORTAR:
 - paineis exportam tamanho e posicao pelas coordenadas CSS do editor
