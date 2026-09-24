@@ -23,9 +23,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v49-viewport-floating-actions";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v50-visual-viewport-actions";
 
-    const BUILD = "v49-viewport-floating-actions";
+    const BUILD = "v50-visual-viewport-actions";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -10171,30 +10171,77 @@
         // belong to the viewport, not to the long page below the preview.
         document.documentElement.appendChild(toolbar);
 
-        const syncViewportScale = () => {
-            const visualScale = Number(
-                window.visualViewport?.scale
-            ) || 1;
-            const inverseScale = Math.max(
-                0.75,
-                Math.min(3, 1 / visualScale)
-            );
+        // On Android Chrome, a fixed element follows the layout viewport,
+        // which can sit outside the actually visible viewport after pinch
+        // zoom. Anchor the toolbar to visualViewport using page coordinates.
+        toolbar.style.display = "flex";
 
-            toolbar.style.setProperty(
-                "--rag-floating-inverse-scale",
-                String(inverseScale)
-            );
+        let viewportFrame = 0;
+        const syncViewportPosition = () => {
+            window.cancelAnimationFrame(viewportFrame);
+            viewportFrame = window.requestAnimationFrame(() => {
+                const viewport = window.visualViewport;
+                const visualScale = Number(viewport?.scale) || 1;
+                const inverseScale = Math.max(
+                    0.75,
+                    Math.min(3, 1 / visualScale)
+                );
+                const pageLeft = Number.isFinite(viewport?.pageLeft)
+                    ? viewport.pageLeft
+                    : window.scrollX + (viewport?.offsetLeft || 0);
+                const pageTop = Number.isFinite(viewport?.pageTop)
+                    ? viewport.pageTop
+                    : window.scrollY + (viewport?.offsetTop || 0);
+                const viewportWidth = viewport?.width || window.innerWidth;
+                const viewportHeight = viewport?.height || window.innerHeight;
+                const margin = 8 * inverseScale;
+                const toolbarWidth = toolbar.offsetWidth * inverseScale;
+                const toolbarHeight = toolbar.offsetHeight * inverseScale;
+                const centeredTop =
+                    pageTop + (viewportHeight - toolbarHeight) / 2;
+                const minimumTop = pageTop + margin;
+                const maximumTop =
+                    pageTop + viewportHeight - toolbarHeight - margin;
+                const toolbarTop = maximumTop >= minimumTop
+                    ? Math.min(
+                        Math.max(centeredTop, minimumTop),
+                        maximumTop
+                    )
+                    : minimumTop;
+
+                toolbar.style.setProperty(
+                    "--rag-floating-inverse-scale",
+                    String(inverseScale)
+                );
+                toolbar.style.left = `${Math.max(
+                    pageLeft + margin,
+                    pageLeft + viewportWidth - toolbarWidth - margin
+                )}px`;
+                toolbar.style.top = `${toolbarTop}px`;
+            });
         };
 
-        syncViewportScale();
+        syncViewportPosition();
+        window.setTimeout(syncViewportPosition, 100);
         window.visualViewport?.addEventListener(
             "resize",
-            syncViewportScale,
+            syncViewportPosition,
             { passive: true }
         );
         window.visualViewport?.addEventListener(
             "scroll",
-            syncViewportScale,
+            syncViewportPosition,
+            { passive: true }
+        );
+        window.addEventListener("scroll", syncViewportPosition, {
+            passive: true,
+        });
+        window.addEventListener("resize", syncViewportPosition, {
+            passive: true,
+        });
+        window.addEventListener(
+            "orientationchange",
+            syncViewportPosition,
             { passive: true }
         );
 
@@ -17849,9 +17896,10 @@
 }
 
 .rag-mobile-floating-actions {
-    position: fixed !important;
-    right: max(10px, env(safe-area-inset-right)) !important;
-    top: 50% !important;
+    position: absolute !important;
+    left: 0;
+    right: auto !important;
+    top: 0;
     bottom: auto !important;
     z-index: 900000 !important;
     display: none;
@@ -17866,8 +17914,8 @@
     backdrop-filter: blur(8px);
     pointer-events: auto;
     touch-action: manipulation;
-    transform: translateY(-50%) scale(var(--rag-floating-inverse-scale, 1));
-    transform-origin: right center;
+    transform: scale(var(--rag-floating-inverse-scale, 1));
+    transform-origin: top left;
 }
 
 .rag-mobile-floating-action {
@@ -17920,8 +17968,6 @@
 
 @media (max-width: 430px) {
     .rag-mobile-floating-actions {
-        right: max(6px, env(safe-area-inset-right)) !important;
-        top: 50% !important;
         gap: 3px;
         padding: 4px;
     }
