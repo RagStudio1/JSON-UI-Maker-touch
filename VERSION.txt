@@ -1,5 +1,15 @@
-JSON-UI-Maker Patch v30
-Build: v30-explorer-panel-lock
+JSON-UI-Maker Patch v31
+Build: v31-roundtrip-import-fix
+
+EXPORTAR / IMPORTAR:
+- paineis exportam tamanho e posicao pelas coordenadas CSS do editor
+- o zoom/escala do navegador nao altera mais a geometria salva
+- metadados do editor sao preservados em $rag_editor
+- roles de BACKGROUND, BORDER, HEADER e CONTENT SLOT voltam corretamente
+- clipping, editabilidade, ordem de camada e tamanho exato sao restaurados
+- arquivos antigos detectam bordas grandes por textura/camada e as tornam decorativas
+- bordas transparentes nao bloqueiam mais cliques nos controles internos
+- background continua editavel depois de importar
 
 EXPLORER MOBILE:
 - lista de itens em painel fixo completo no lado direito

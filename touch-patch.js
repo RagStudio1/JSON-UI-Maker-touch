@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v30-explorer-panel-lock";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v31-roundtrip-import-fix";
 
-    const BUILD = "v30-explorer-panel-lock";
+    const BUILD = "v31-roundtrip-import-fix";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -170,6 +170,8 @@
             index,
             config: configMod.config,
             FormUploader: uploadMod.FormUploader,
+            tagNameToCreateClassElementFunc:
+                uploadMod.tagNameToCreateClassElementFunc,
             DraggablePanel: panelMod.DraggablePanel,
             DraggableCanvas: canvasMod.DraggableCanvas,
             DraggableCollectionPanel: collectionMod.DraggableCollectionPanel,
@@ -5239,6 +5241,195 @@
                 return result;
             }
         );
+    }
+
+    function editorRoundTripMetadata(element, mods) {
+        const instance = mods.index.GLOBAL_ELEMENT_MAP.get(
+            element.dataset.id
+        );
+
+        return {
+            version: 1,
+            dataset: copyRagDataset(element),
+            style: {
+                left: element.style.left,
+                top: element.style.top,
+                width: element.style.width,
+                height: element.style.height,
+                zIndex: element.style.zIndex,
+            },
+            isEditable:
+                typeof instance?.isEditable === "boolean"
+                    ? instance.isEditable
+                    : undefined,
+        };
+    }
+
+    function applyRoundTripMetadata(instance, metadata) {
+        if (typeof metadata === "string") {
+            try {
+                metadata = JSON.parse(metadata);
+            } catch (_) {
+                return;
+            }
+        }
+
+        if (!instance || !metadata || typeof metadata !== "object") return;
+
+        const element = instance.getMainHTMLElement?.();
+        if (!(element instanceof HTMLElement)) return;
+
+        restoreRagDataset(element, metadata.dataset);
+
+        const style = metadata.style || {};
+        for (const key of ["left", "top", "width", "height", "zIndex"]) {
+            if (typeof style[key] === "string" && style[key]) {
+                element.style[key] = style[key];
+            }
+        }
+
+        if (typeof metadata.isEditable === "boolean") {
+            if (typeof instance.setEditable === "function") {
+                instance.setEditable(metadata.isEditable);
+            } else {
+                instance.isEditable = metadata.isEditable;
+            }
+        }
+
+        const role = element.dataset.ragBorderSystemRole;
+
+        if (role === "border" || element.dataset.ragFixedDecorative === "true") {
+            element.style.pointerEvents = "none";
+            instance.gridElement?.style.setProperty("pointer-events", "none");
+            if (instance.resizeHandle) instance.resizeHandle.style.display = "none";
+        } else if (role === "background") {
+            element.style.pointerEvents = "auto";
+            instance.gridElement?.style.setProperty("pointer-events", "auto");
+            if (instance.resizeHandle) instance.resizeHandle.style.display = "block";
+        }
+
+        if (element.dataset.ragClipsChildren !== undefined) {
+            element.style.overflow =
+                element.dataset.ragClipsChildren === "true"
+                    ? "hidden"
+                    : "visible";
+        }
+    }
+
+    function repairLegacyImportedLayers(mods) {
+        for (const instance of mods.index.GLOBAL_ELEMENT_MAP.values()) {
+            if (!(instance instanceof mods.DraggableCanvas)) continue;
+
+            const element = instance.canvasHolder;
+            const texture = String(element.dataset.imagePath || "").toLowerCase();
+            const layer = Number(element.style.zIndex) || 0;
+            const parentRect = element.parentElement?.getBoundingClientRect();
+            const rect = element.getBoundingClientRect();
+            const coversParent = Boolean(
+                parentRect?.width &&
+                parentRect?.height &&
+                rect.width >= parentRect.width * 0.72 &&
+                rect.height >= parentRect.height * 0.72
+            );
+
+            const looksLikeBorder =
+                (
+                    /(^|[\/_.-])(border|frame)([\/_.-]|$)/.test(texture) &&
+                    (layer >= 40 || coversParent)
+                ) ||
+                (layer === 60 && coversParent);
+
+            if (!looksLikeBorder) continue;
+
+            element.dataset.ragBorderSystemRole = "border";
+            element.dataset.ragFixedDecorative = "true";
+            element.dataset.ragExplorerName = "BORDER";
+            element.style.pointerEvents = "none";
+            instance.gridElement?.style.setProperty("pointer-events", "none");
+            instance.setEditable?.(false);
+            if (instance.resizeHandle) instance.resizeHandle.style.display = "none";
+        }
+    }
+
+    function patchNativeRoundTrip(mods) {
+        if (mods.classToJsonUI.__ragRoundTripV31) return;
+        mods.classToJsonUI.__ragRoundTripV31 = true;
+
+        for (const className of [
+            "draggable-panel",
+            "draggable-collection_panel",
+            "draggable-canvas",
+            "draggable-button",
+            "draggable-label",
+            "draggable-scrolling_panel",
+        ]) {
+            const original = mods.classToJsonUI.get(className);
+            if (!original) continue;
+
+            mods.classToJsonUI.set(className, (element, namespace) => {
+                const result = original(element, namespace);
+
+                if (result?.element) {
+                    // Panels in the upstream exporter use getBoundingClientRect,
+                    // which can include viewport/browser scaling on mobile.
+                    // Persist layout from CSS coordinates, matching the values
+                    // used by dragging, resizing and the native importer.
+                    if (
+                        className === "draggable-panel" &&
+                        Array.isArray(result.element.size)
+                    ) {
+                        const width = parseFloat(element.style.width);
+                        const height = parseFloat(element.style.height);
+                        const scalar = Number(mods.config.magicNumbers.UI_SCALAR) || 0.36;
+
+                        if (Number.isFinite(width) && Number.isFinite(height)) {
+                            result.element.size = [
+                                width * scalar,
+                                height * scalar,
+                            ];
+
+                            if (element.parentElement === mods.config.rootElement) {
+                                result.element.offset = [
+                                    parseFloat(element.style.left || "0") * scalar,
+                                    parseFloat(element.style.top || "0") * scalar,
+                                ];
+                            }
+                        }
+                    }
+
+                    // A string-valued JSON-UI variable remains harmless to the
+                    // game while carrying editor-only state for a later import.
+                    result.element.$rag_editor = JSON.stringify(
+                        editorRoundTripMetadata(element, mods)
+                    );
+                }
+
+                return result;
+            });
+        }
+
+        const creators = mods.tagNameToCreateClassElementFunc;
+
+        if (creators && !creators.__ragRoundTripV31) {
+            creators.__ragRoundTripV31 = true;
+
+            for (const [type, original] of [...creators.entries()]) {
+                creators.set(type, (...args) => {
+                    const result = original(...args);
+                    applyRoundTripMetadata(result?.element, args[0]?.$rag_editor);
+                    return result;
+                });
+            }
+        }
+
+        const originalUpload = mods.FormUploader.uploadForm;
+
+        mods.FormUploader.uploadForm = function (...args) {
+            const result = originalUpload.apply(this, args);
+            repairLegacyImportedLayers(mods);
+            mods.index.Builder.updateExplorer();
+            return result;
+        };
     }
 
     function appendControlPropertyTools(
@@ -10953,8 +11144,7 @@
     outline-style: dashed !important;
 }
 
-[data-rag-border-system-role="border"],
-[data-rag-border-system-role="background"] {
+[data-rag-border-system-role="border"] {
     pointer-events: none !important;
 }
 
@@ -11418,6 +11608,7 @@
 
         patchClipsChildrenExport(mods);
         patchAdvancedControlExport(mods);
+        patchNativeRoundTrip(mods);
         patchNestedPanelDrag(mods);
         patchPanelLock(mods);
         patchCopyPasteMetadata(mods);
