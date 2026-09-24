@@ -1,5 +1,18 @@
-JSON-UI-Maker Patch v40
-Build: v40-image-to-ui-rebuilder
+JSON-UI-Maker Patch v41
+Build: v41-structural-image-analysis
+
+ANALISE ESTRUTURAL REFEITA:
+- remove deteccao por blocos de cor que confundia letras e pixels de sprites
+- procura molduras retangulares completas com suporte nos quatro lados
+- agrupa controles repetidos e prefere a moldura externa de cada componente
+- normaliza o tamanho dos controles repetidos pela mediana do grupo
+- ignora detalhes internos de botoes, icones, textos e personagens
+- encontra imagens grandes isoladas dentro de paineis, como skins e personagens
+- analisa pixel art sem suavizacao e usa a resolucao original quando possivel
+- padrao de contraste ajustado para interfaces escuras
+- etiquetas aparecem somente na regiao selecionada
+- desenho manual agora exige o botao DESENHAR NOVA REGIAO
+- evita regioes manuais acidentais causadas por arraste no celular
 
 IMAGEM -> UI:
 - importa PNG, JPG ou WEBP e analisa tudo localmente no navegador

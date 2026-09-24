@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v40-image-to-ui-rebuilder";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v41-structural-image-analysis";
 
-    const BUILD = "v40-image-to-ui-rebuilder";
+    const BUILD = "v41-structural-image-analysis";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -10084,99 +10084,156 @@
         return strong / Math.max(1, total);
     }
 
-    function rebuildColorRegions(imageData, sensitivity, minSide) {
-        const { width, height, data } = imageData;
-        const bucket = Math.max(10, Math.min(40, Math.round(sensitivity * 0.8)));
-        const keys = new Uint32Array(width * height);
-        const visited = new Uint8Array(width * height);
-        const queue = new Int32Array(width * height);
+    function rebuildForegroundRegions(
+        source,
+        structuralRegions,
+        minSide,
+        sensitivity
+    ) {
+        const result = [];
+        const totalArea = source.width * source.height;
 
-        for (let index = 0; index < width * height; index++) {
-            const offset = index * 4;
-            const r = Math.floor(data[offset] / bucket);
-            const g = Math.floor(data[offset + 1] / bucket);
-            const b = Math.floor(data[offset + 2] / bucket);
-            keys[index] = (r << 16) | (g << 8) | b;
-        }
+        for (const panel of structuralRegions) {
+            if (
+                panel.type !== "panel" ||
+                rebuildArea(panel) / Math.max(1, totalArea) < 0.06
+            ) {
+                continue;
+            }
 
-        const regions = [];
-        const minimumArea = Math.max(24, minSide * minSide * 0.7);
+            const children = structuralRegions.filter(
+                (candidate) =>
+                    candidate !== panel &&
+                    rebuildArea(candidate) < rebuildArea(panel) * 0.9 &&
+                    rebuildContains(panel, candidate, 0)
+            );
 
-        for (let seed = 0; seed < width * height; seed++) {
-            if (visited[seed]) continue;
+            // A panel that already contains detected controls should stay a
+            // container. Scanning its pixels again would rediscover letters,
+            // icons and button internals as dozens of false elements.
+            if (children.length) continue;
 
-            const key = keys[seed];
-            let head = 0;
-            let tail = 0;
-            let count = 0;
-            let left = width;
-            let right = 0;
-            let top = height;
-            let bottom = 0;
+            const panelWidth = panel.r - panel.l;
+            const panelHeight = panel.b - panel.t;
+            const inset = Math.max(
+                5,
+                Math.round(Math.min(panelWidth, panelHeight) * 0.035)
+            );
+            const left = Math.max(0, panel.l + inset);
+            const top = Math.max(0, panel.t + inset);
+            const right = Math.min(source.width, panel.r - inset);
+            const bottom = Math.min(source.height, panel.b - inset);
 
-            visited[seed] = 1;
-            queue[tail++] = seed;
+            if (right - left < minSide || bottom - top < minSide) continue;
 
-            while (head < tail) {
-                const index = queue[head++];
-                const x = index % width;
-                const y = Math.floor(index / width);
+            const sampleStep = Math.max(
+                2,
+                Math.floor(Math.max(panelWidth, panelHeight) / 800)
+            );
+            const bins = new Map();
 
-                count++;
-                left = Math.min(left, x);
-                right = Math.max(right, x + 1);
-                top = Math.min(top, y);
-                bottom = Math.max(bottom, y + 1);
+            for (let y = top; y < bottom; y += sampleStep) {
+                for (let x = left; x < right; x += sampleStep) {
+                    const offset = (y * source.width + x) * 4;
+                    if (source.data[offset + 3] < 16) continue;
+                    const key =
+                        ((source.data[offset] >> 3) << 10) |
+                        ((source.data[offset + 1] >> 3) << 5) |
+                        (source.data[offset + 2] >> 3);
+                    bins.set(key, (bins.get(key) || 0) + 1);
+                }
+            }
 
-                const neighbors = [
-                    x > 0 ? index - 1 : -1,
-                    x + 1 < width ? index + 1 : -1,
-                    y > 0 ? index - width : -1,
-                    y + 1 < height ? index + width : -1,
-                ];
+            let dominantKey = 0;
+            let dominantCount = 0;
 
-                for (const neighbor of neighbors) {
+            for (const [key, count] of bins) {
+                if (count > dominantCount) {
+                    dominantKey = key;
+                    dominantCount = count;
+                }
+            }
+
+            if (!dominantCount) continue;
+
+            const base = [
+                ((dominantKey >> 10) & 31) * 8 + 4,
+                ((dominantKey >> 5) & 31) * 8 + 4,
+                (dominantKey & 31) * 8 + 4,
+            ];
+            const differenceThreshold = Math.max(26, sensitivity * 1.35);
+            const scanStep = Math.max(
+                1,
+                Math.floor(Math.max(panelWidth, panelHeight) / 1000)
+            );
+            let foundLeft = right;
+            let foundTop = bottom;
+            let foundRight = left;
+            let foundBottom = top;
+            let foregroundPixels = 0;
+
+            for (let y = top; y < bottom; y += scanStep) {
+                for (let x = left; x < right; x += scanStep) {
+                    const offset = (y * source.width + x) * 4;
+                    const difference = Math.max(
+                        Math.abs(source.data[offset] - base[0]),
+                        Math.abs(source.data[offset + 1] - base[1]),
+                        Math.abs(source.data[offset + 2] - base[2])
+                    );
+
                     if (
-                        neighbor >= 0 &&
-                        !visited[neighbor] &&
-                        keys[neighbor] === key
+                        source.data[offset + 3] >= 16 &&
+                        difference > differenceThreshold
                     ) {
-                        visited[neighbor] = 1;
-                        queue[tail++] = neighbor;
+                        foregroundPixels++;
+                        foundLeft = Math.min(foundLeft, x);
+                        foundTop = Math.min(foundTop, y);
+                        foundRight = Math.max(foundRight, x + scanStep);
+                        foundBottom = Math.max(foundBottom, y + scanStep);
                     }
                 }
             }
 
-            const regionWidth = right - left;
-            const regionHeight = bottom - top;
-            const boxArea = regionWidth * regionHeight;
-            const fill = count / Math.max(1, boxArea);
+            const foreground = {
+                l: Math.max(left, foundLeft - 2),
+                t: Math.max(top, foundTop - 2),
+                r: Math.min(right, foundRight + 2),
+                b: Math.min(bottom, foundBottom + 2),
+            };
+            const foregroundArea = rebuildArea(foreground);
+            const panelArea = rebuildArea(panel);
+            const occupancy =
+                foregroundPixels * scanStep * scanStep /
+                Math.max(1, foregroundArea);
 
             if (
-                count >= minimumArea &&
-                regionWidth >= minSide &&
-                regionHeight >= minSide &&
-                fill >= 0.62 &&
-                boxArea < width * height * 0.9
+                foreground.r - foreground.l >= minSide &&
+                foreground.b - foreground.t >= minSide &&
+                foregroundArea / panelArea >= 0.015 &&
+                foregroundArea / panelArea <= 0.74 &&
+                occupancy >= 0.035
             ) {
-                regions.push({
-                    l: left,
-                    t: top,
-                    r: right,
-                    b: bottom,
-                    score: Math.min(0.92, 0.45 + fill * 0.45),
-                    detector: "color",
+                result.push({
+                    ...foreground,
+                    id: newId(),
+                    type: "image",
+                    score: Math.min(0.96, 0.65 + occupancy * 0.25),
+                    detector: "foreground",
+                    repeat: 1,
+                    manual: false,
                 });
             }
         }
 
-        return regions;
+        return result;
     }
 
-    function analyzeScreenshotRegions(source, sensitivity = 30, minPercent = 3) {
+    function analyzeScreenshotRegions(source, sensitivity = 18, minPercent = 3) {
+        const maxPixels = 1200000;
         const analysisScale = Math.min(
             1,
-            480 / Math.max(source.width, source.height)
+            1400 / Math.max(source.width, source.height),
+            Math.sqrt(maxPixels / Math.max(1, source.width * source.height))
         );
         const width = Math.max(2, Math.round(source.width * analysisScale));
         const height = Math.max(2, Math.round(source.height * analysisScale));
@@ -10190,7 +10247,7 @@
         sourceCanvas.getContext("2d").putImageData(source, 0, 0);
 
         const context = canvas.getContext("2d", { willReadFrequently: true });
-        context.imageSmoothingEnabled = true;
+        context.imageSmoothingEnabled = false;
         context.drawImage(sourceCanvas, 0, 0, width, height);
         const small = context.getImageData(0, 0, width, height);
         const horizontalEdges = new Uint8Array(width * height);
@@ -10231,23 +10288,20 @@
             true,
             minSide
         );
-        const candidates = rebuildColorRegions(
-            small,
-            sensitivity,
-            minSide
-        );
+        const candidates = [];
 
         const sortedLines = [...horizontalLines].sort((a, b) => a.p - b.p);
 
         for (let i = 0; i < sortedLines.length; i++) {
             const topLine = sortedLines[i];
+            const matches = [];
 
             for (let j = i + 1; j < sortedLines.length; j++) {
                 const bottomLine = sortedLines[j];
                 const boxHeight = bottomLine.p - topLine.p;
 
                 if (boxHeight < minSide) continue;
-                if (boxHeight > height * 0.8) break;
+                if (boxHeight > height * 0.9) break;
 
                 const overlap = Math.max(
                     0,
@@ -10256,10 +10310,10 @@
                 );
                 const shorter = Math.min(topLine.length, bottomLine.length);
 
-                if (overlap / Math.max(1, shorter) < 0.78) continue;
+                if (overlap / Math.max(1, shorter) < 0.86) continue;
                 if (
-                    Math.abs(topLine.a - bottomLine.a) > Math.max(4, shorter * 0.12) ||
-                    Math.abs(topLine.b - bottomLine.b) > Math.max(4, shorter * 0.12)
+                    Math.abs(topLine.a - bottomLine.a) > Math.max(3, shorter * 0.08) ||
+                    Math.abs(topLine.b - bottomLine.b) > Math.max(3, shorter * 0.08)
                 ) {
                     continue;
                 }
@@ -10283,23 +10337,26 @@
                     bottomLine.p
                 );
 
-                if (Math.min(leftSupport, rightSupport) < 0.16) continue;
+                const sideSupport = Math.min(leftSupport, rightSupport);
 
-                candidates.push({
+                if (sideSupport < 0.55) continue;
+
+                matches.push({
                     l: left,
                     t: topLine.p,
                     r: right,
                     b: bottomLine.p + 1,
-                    score: Math.min(
-                        0.99,
-                        0.58 + (leftSupport + rightSupport) * 0.18
-                    ),
-                    detector: "edge",
+                    score: sideSupport,
+                    detector: "frame",
                 });
-
-                // The closest matching lower edge is normally the useful one.
-                break;
             }
+
+            matches.sort(
+                (a, b) =>
+                    b.score - a.score ||
+                    rebuildArea(b) - rebuildArea(a)
+            );
+            candidates.push(...matches.slice(0, 4));
         }
 
         const sourceScaleX = source.width / width;
@@ -10317,14 +10374,14 @@
                 const heightPx = candidate.b - candidate.t;
                 const areaRatio = rebuildArea(candidate) /
                     Math.max(1, source.width * source.height);
-                return widthPx >= 8 && heightPx >= 8 && areaRatio < 0.88;
+                return widthPx >= 8 && heightPx >= 8 && areaRatio < 0.96;
             })
-            .sort((a, b) => b.score - a.score || rebuildArea(b) - rebuildArea(a));
+            .sort((a, b) => rebuildArea(b) - rebuildArea(a) || b.score - a.score);
 
-        const kept = [];
+        const deduplicated = [];
 
         for (const candidate of normalized) {
-            const duplicate = kept.some((other) => {
+            const duplicate = deduplicated.some((other) => {
                 const edgeDistance =
                     Math.abs(other.l - candidate.l) +
                     Math.abs(other.t - candidate.t) +
@@ -10335,45 +10392,118 @@
                     (candidate.b - candidate.t);
 
                 return (
-                    rebuildIou(other, candidate) > 0.78 ||
+                    rebuildIou(other, candidate) > 0.72 ||
                     edgeDistance / Math.max(1, perimeter) < 0.06
                 );
             });
 
-            if (!duplicate) kept.push(candidate);
-            if (kept.length >= 42) break;
+            if (!duplicate) deduplicated.push(candidate);
         }
 
-        for (const candidate of kept) {
+        for (const candidate of deduplicated) {
+            const widthPx = candidate.r - candidate.l;
+            const heightPx = candidate.b - candidate.t;
+            const peers = deduplicated.filter((other) => {
+                if (other === candidate) return false;
+                const otherWidth = other.r - other.l;
+                const otherHeight = other.b - other.t;
+                return (
+                    Math.abs(otherWidth - widthPx) / Math.max(widthPx, otherWidth) < 0.13 &&
+                    Math.abs(otherHeight - heightPx) / Math.max(heightPx, otherHeight) < 0.13
+                );
+            });
+
+            candidate.repeat = peers.length + 1;
+
+            if (candidate.repeat >= 3) {
+                const group = [candidate, ...peers];
+                const widths = group
+                    .map((item) => item.r - item.l)
+                    .sort((a, b) => a - b);
+                const heights = group
+                    .map((item) => item.b - item.t)
+                    .sort((a, b) => a - b);
+                const medianWidth = widths[Math.floor(widths.length / 2)];
+                const medianHeight = heights[Math.floor(heights.length / 2)];
+
+                candidate.r = Math.min(source.width, candidate.l + medianWidth);
+                candidate.b = Math.min(source.height, candidate.t + medianHeight);
+            }
+        }
+
+        const structural = deduplicated.filter((candidate) => {
+            const areaRatio = rebuildArea(candidate) /
+                Math.max(1, source.width * source.height);
+            const repeatedOuter = deduplicated.find(
+                (other) =>
+                    other !== candidate &&
+                    other.repeat >= 3 &&
+                    rebuildContains(other, candidate, 2) &&
+                    rebuildArea(other) > rebuildArea(candidate) * 1.45
+            );
+
+            if (candidate.repeat >= 3 && repeatedOuter) return false;
+            if (areaRatio >= 0.035) return true;
+            if (candidate.repeat >= 3) return true;
+            if (areaRatio >= 0.012) return candidate.score >= 0.88;
+
+            if (areaRatio >= 0.0022 && candidate.score >= 0.82) {
+                const parent = deduplicated
+                    .filter(
+                        (other) =>
+                            other !== candidate &&
+                            rebuildContains(other, candidate, 0) &&
+                            rebuildArea(other) > rebuildArea(candidate) * 1.5
+                    )
+                    .sort((a, b) => rebuildArea(a) - rebuildArea(b))[0];
+
+                if (!parent) return false;
+
+                const nearParentEdge =
+                    candidate.l - parent.l < Math.max(20, (parent.r - parent.l) * 0.12) ||
+                    parent.r - candidate.r < Math.max(20, (parent.r - parent.l) * 0.12) ||
+                    candidate.t - parent.t < Math.max(20, (parent.b - parent.t) * 0.18) ||
+                    parent.b - candidate.b < Math.max(20, (parent.b - parent.t) * 0.18);
+
+                return nearParentEdge;
+            }
+
+            return false;
+        });
+
+        for (const candidate of structural) {
             const widthPx = candidate.r - candidate.l;
             const heightPx = candidate.b - candidate.t;
             const aspect = widthPx / Math.max(1, heightPx);
             const areaRatio = rebuildArea(candidate) /
                 Math.max(1, source.width * source.height);
 
-            const repeated = kept.filter((other) => {
-                if (other === candidate) return false;
-                const otherWidth = other.r - other.l;
-                const otherHeight = other.b - other.t;
-                return (
-                    Math.abs(otherWidth - widthPx) / Math.max(widthPx, otherWidth) < 0.16 &&
-                    Math.abs(otherHeight - heightPx) / Math.max(heightPx, otherHeight) < 0.16
-                );
-            }).length >= 1;
-
             candidate.type =
-                areaRatio >= 0.17
+                areaRatio >= 0.12
                     ? "panel"
+                    : candidate.repeat >= 3
+                    ? "button"
                     : aspect >= 3.2 && candidate.t < source.height * 0.42
                     ? "header"
-                    : repeated && areaRatio <= 0.12
+                    : aspect <= 0.22
+                    ? "image"
+                    : areaRatio < 0.012 && candidate.score >= 0.82
                     ? "button"
-                    : "image";
+                    : "panel";
             candidate.id = newId();
             candidate.manual = false;
         }
 
-        return kept.sort((a, b) => rebuildArea(b) - rebuildArea(a));
+        const foreground = rebuildForegroundRegions(
+            source,
+            structural,
+            Math.max(8, Math.round(Math.min(source.width, source.height) * minPercent / 100)),
+            sensitivity
+        );
+
+        return [...structural, ...foreground]
+            .sort((a, b) => rebuildArea(b) - rebuildArea(a))
+            .slice(0, 32);
     }
 
     function rebuildRingColor(source, rect) {
@@ -11166,12 +11296,12 @@
                 analysisControls.className = "rag-rebuild-analysis";
 
                 const sensitivityLabel = document.createElement("label");
-                sensitivityLabel.textContent = "Sensibilidade";
+                sensitivityLabel.textContent = "Contraste da moldura";
                 const sensitivity = document.createElement("input");
                 sensitivity.type = "range";
-                sensitivity.min = "12";
-                sensitivity.max = "64";
-                sensitivity.value = "30";
+                sensitivity.min = "8";
+                sensitivity.max = "40";
+                sensitivity.value = "18";
                 sensitivityLabel.appendChild(sensitivity);
 
                 const minimumLabel = document.createElement("label");
@@ -11221,10 +11351,14 @@
 
                 roleLabel.appendChild(role);
 
+                const drawRegion = document.createElement("button");
+                drawRegion.type = "button";
+                drawRegion.textContent = "DESENHAR NOVA REGIAO";
+
                 const remove = document.createElement("button");
                 remove.type = "button";
                 remove.textContent = "EXCLUIR REGIAO";
-                selectionTools.append(roleLabel, remove);
+                selectionTools.append(roleLabel, drawRegion, remove);
 
                 const referenceLabel = document.createElement("label");
                 referenceLabel.className = "rag-rebuild-reference-option";
@@ -11268,6 +11402,7 @@
                 let regions = [];
                 let selectedId = "";
                 let operation = null;
+                let drawingMode = false;
 
                 const sourcePoint = (event) => {
                     const rect = stage.getBoundingClientRect();
@@ -11314,6 +11449,10 @@
                     const selected = selectedRegion();
                     role.disabled = !selected;
                     remove.disabled = !selected;
+                    drawRegion.classList.toggle("active", drawingMode);
+                    drawRegion.textContent = drawingMode
+                        ? "ARRASTE NA IMAGEM..."
+                        : "DESENHAR NOVA REGIAO";
 
                     if (selected) role.value = selected.type;
 
@@ -11324,6 +11463,8 @@
                         `${manualCount} manuais` +
                         (selected
                             ? ` • selecionada: ${Math.round(selected.r - selected.l)} x ${Math.round(selected.b - selected.t)} px`
+                            : drawingMode
+                            ? " • arraste para marcar a nova regiao"
                             : " • toque numa regiao para classificar");
                 };
 
@@ -11365,7 +11506,7 @@
                             start: point,
                             original: { ...selected },
                         };
-                    } else {
+                    } else if (drawingMode) {
                         const region = {
                             id: newId(),
                             l: point.x,
@@ -11384,6 +11525,10 @@
                             start: point,
                             original: { ...region },
                         };
+                    } else {
+                        selectedId = "";
+                        render();
+                        return;
                     }
 
                     stage.setPointerCapture?.(event.pointerId);
@@ -11432,6 +11577,7 @@
 
                 const finishOperation = (event) => {
                     if (!operation) return;
+                    const completedKind = operation.kind;
                     const selected = selectedRegion();
 
                     if (
@@ -11443,6 +11589,7 @@
                     }
 
                     operation = null;
+                    if (completedKind === "create") drawingMode = false;
                     try {
                         stage.releasePointerCapture?.(event.pointerId);
                     } catch (_) {}
@@ -11475,10 +11622,17 @@
                     render();
                 });
 
+                drawRegion.addEventListener("click", () => {
+                    drawingMode = !drawingMode;
+                    if (drawingMode) selectedId = "";
+                    render();
+                });
+
                 analyze.addEventListener("click", runAnalysis);
                 clear.addEventListener("click", () => {
                     regions = [];
                     selectedId = "";
+                    drawingMode = false;
                     render();
                 });
                 cancel.addEventListener("click", () => overlay.remove());
@@ -14028,6 +14182,10 @@
     pointer-events: none;
 }
 
+.rag-rebuild-region:not(.selected) > span {
+    display: none;
+}
+
 .rag-rebuild-region:not(.selected) .rag-crop-handle {
     display: none;
 }
@@ -14050,9 +14208,15 @@
 
 .rag-rebuild-selection-tools {
     display: grid;
-    grid-template-columns: 1fr minmax(150px,.45fr);
+    grid-template-columns: minmax(260px,1fr) minmax(150px,.45fr) minmax(140px,.4fr);
     gap: 8px;
     margin-bottom: 8px;
+}
+
+.rag-rebuild-selection-tools button.active {
+    border-color: #57d8ff;
+    background: linear-gradient(135deg,#176497,#6e36af);
+    box-shadow: 0 0 0 2px rgba(87,216,255,.2);
 }
 
 .rag-rebuild-selection-tools label {
