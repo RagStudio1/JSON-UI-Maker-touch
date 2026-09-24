@@ -1,5 +1,12 @@
-JSON-UI-Maker Patch v42
-Build: v42-layer-order-controls
+JSON-UI-Maker Patch v43
+Build: v43-safe-rebuild-background-delete
+
+EXCLUSAO SEGURA NO IMAGEM -> UI:
+- o painel raiz UI RECONSTRUIDA fica protegido contra exclusao acidental
+- fundos reconstruidos agora podem ser selecionados na lista e apagados sozinhos
+- remover um fundo nao remove paineis, botoes, textos ou imagens detectadas
+- barra da referencia ganhou REMOVER REFERENCIA e REMOVER FUNDOS
+- observadores de redimensionamento sao desligados ao excluir um fundo
 
 CONTROLES DE ORDEM EM ITENS / CAMADAS:
 - novo botao SUBIR / FRENTE move o item uma camada para frente

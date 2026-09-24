@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v42-layer-order-controls";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v43-safe-rebuild-background-delete";
 
-    const BUILD = "v42-layer-order-controls";
+    const BUILD = "v43-safe-rebuild-background-delete";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -11301,6 +11301,33 @@
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
+    function configureSafeRebuildBackground(instance) {
+        const element = instance?.getMainHTMLElement?.();
+        const role = element?.dataset?.ragScreenshotRole || "";
+        const isBackground =
+            role === "background" ||
+            role.endsWith("_background");
+
+        if (!(element instanceof HTMLElement) || !isBackground) {
+            return false;
+        }
+
+        element.dataset.ragScreenshotBackground = "true";
+        element.dataset.ragExplorerName = "FUNDO RECONSTRUIDO";
+        element.style.pointerEvents = "none";
+        instance.gridElement?.style.setProperty("pointer-events", "none");
+
+        if (instance.resizeHandle) {
+            instance.resizeHandle.style.display = "none";
+        }
+
+        // Selection still works through Itens/Camadas. Direct pointer input
+        // remains disabled so the full-size image cannot capture drags.
+        instance.isEditable = true;
+        instance.deleteable = true;
+        return true;
+    }
+
     function createRebuildCanvas(
         parent,
         imageData,
@@ -11325,6 +11352,10 @@
         );
 
         mods.index.GLOBAL_ELEMENT_MAP.set(id, image);
+        const isBackground =
+            role === "background" ||
+            role.endsWith("_background");
+
         image.drawImage(Math.max(1, box.width), Math.max(1, box.height), false);
         image.canvasHolder.style.left = `${box.left}px`;
         image.canvasHolder.style.top = `${box.top}px`;
@@ -11332,7 +11363,11 @@
         image.canvasHolder.dataset.ragKeepAspect = "false";
         image.canvasHolder.dataset.ragScreenshotRole = role;
         image.canvasHolder.dataset.ragExplorerName =
-            role === "background" ? "FUNDO RECONSTRUIDO" : "IMAGEM RECONSTRUIDA";
+            isBackground ? "FUNDO RECONSTRUIDO" : "IMAGEM RECONSTRUIDA";
+
+        if (isBackground) {
+            image.canvasHolder.dataset.ragScreenshotBackground = "true";
+        }
 
         if (locked) {
             image.canvasHolder.dataset.ragFixedDecorative = "true";
@@ -11341,6 +11376,8 @@
             image.gridElement.style.pointerEvents = "none";
             image.resizeHandle.style.display = "none";
             image.editable?.(false);
+
+            configureSafeRebuildBackground(image);
         }
 
         return {
@@ -11373,6 +11410,66 @@
         }
 
         rebuildPanelResizeObserver?.observe(panel);
+    }
+
+    function releaseRebuildPanelBackground(instance) {
+        const element = instance?.getMainHTMLElement?.();
+
+        if (
+            !(element instanceof HTMLElement) ||
+            element.dataset.ragScreenshotBackground !== "true"
+        ) {
+            return;
+        }
+
+        const panel = element.parentElement;
+
+        if (
+            panel instanceof HTMLElement &&
+            rebuildPanelBackgrounds.get(panel) === instance
+        ) {
+            rebuildPanelResizeObserver?.unobserve(panel);
+            rebuildPanelBackgrounds.delete(panel);
+        }
+    }
+
+    function patchSafeRebuildDeletion(mods) {
+        const Builder = mods.index.Builder;
+
+        if (!Builder || Builder.__ragSafeRebuildDeleteV43) return;
+
+        Builder.__ragSafeRebuildDeleteV43 = true;
+        const originalDelete = Builder.delete;
+        const originalExplorerUpdate =
+            mods.ExplorerController.updateExplorer;
+
+        mods.ExplorerController.updateExplorer = function (...args) {
+            for (const instance of mods.index.GLOBAL_ELEMENT_MAP.values()) {
+                configureSafeRebuildBackground(instance);
+            }
+
+            return originalExplorerUpdate.apply(this, args);
+        };
+
+        for (const instance of mods.index.GLOBAL_ELEMENT_MAP.values()) {
+            configureSafeRebuildBackground(instance);
+        }
+
+        Builder.delete = function (id) {
+            const instance = mods.index.GLOBAL_ELEMENT_MAP.get(id);
+            const element = instance?.getMainHTMLElement?.();
+
+            if (element?.dataset?.ragScreenshotRoot === "true") {
+                showBanner(
+                    "UI RECONSTRUIDA protegida. Selecione FUNDO RECONSTRUIDO ou use REMOVER FUNDOS.",
+                    "normal"
+                );
+                return;
+            }
+
+            releaseRebuildPanelBackground(instance);
+            return originalDelete.call(this, id);
+        };
     }
 
     function directRebuildChildren(region, regions) {
@@ -11408,7 +11505,13 @@
             .sort((a, b) => rebuildArea(a) - rebuildArea(b))[0] || null;
     }
 
-    function installScreenshotReference(root, dataUrl, name, assetPaths) {
+    function installScreenshotReference(
+        root,
+        dataUrl,
+        name,
+        assetPaths,
+        mods
+    ) {
         const oldReference = root.querySelector(":scope > .rag-ui-reference");
         oldReference?.remove();
 
@@ -11451,6 +11554,14 @@
         close.type = "button";
         close.textContent = "FECHAR";
 
+        const removeReference = document.createElement("button");
+        removeReference.type = "button";
+        removeReference.textContent = "REMOVER REFERENCIA";
+
+        const removeBackgrounds = document.createElement("button");
+        removeBackgrounds.type = "button";
+        removeBackgrounds.textContent = "REMOVER FUNDOS";
+
         const download = document.createElement("button");
         download.type = "button";
         download.className = "rag-download-assets";
@@ -11473,6 +11584,48 @@
                 reference.style.display = "block";
                 toggle.textContent = "OCULTAR";
             }
+        });
+
+        removeReference.addEventListener("click", () => {
+            if (!reference?.isConnected) return;
+
+            reference.remove();
+            visible = false;
+            toggle.disabled = true;
+            opacity.disabled = true;
+            removeReference.disabled = true;
+            removeReference.textContent = "REFERENCIA REMOVIDA";
+            showBanner(
+                "Referencia removida. A UI editavel foi preservada.",
+                "success"
+            );
+        });
+
+        removeBackgrounds.addEventListener("click", () => {
+            const backgroundIds = [
+                ...root.querySelectorAll(
+                    '[data-rag-screenshot-background="true"][data-id]'
+                ),
+            ].map((element) => element.dataset.id);
+
+            if (!backgroundIds.length) {
+                showBanner(
+                    "Nao existem fundos reconstruidos para remover.",
+                    "normal"
+                );
+                return;
+            }
+
+            for (const id of backgroundIds) {
+                mods.index.Builder.delete(id);
+            }
+
+            removeBackgrounds.disabled = true;
+            removeBackgrounds.textContent = "FUNDOS REMOVIDOS";
+            showBanner(
+                `${backgroundIds.length} fundo(s) removido(s). Os outros itens foram preservados.`,
+                "success"
+            );
         });
 
         download.addEventListener("click", async () => {
@@ -11500,9 +11653,11 @@
         close.addEventListener("click", () => toolbar.remove());
         toolbar.append(title);
 
-        if (reference) toolbar.append(toggle, opacity);
+        if (reference) {
+            toolbar.append(toggle, opacity, removeReference);
+        }
 
-        toolbar.append(download, close);
+        toolbar.append(removeBackgrounds, download, close);
         document.body.appendChild(toolbar);
     }
 
@@ -11579,6 +11734,7 @@
         const rootId = newId();
         const rootPanel = new mods.DraggablePanel(rootId, destination);
         mods.index.GLOBAL_ELEMENT_MAP.set(rootId, rootPanel);
+        rootPanel.deleteable = false;
 
         const root = rootPanel.panel;
         root.style.width = `${rootWidth}px`;
@@ -11774,11 +11930,15 @@
             root,
             includeReference ? sourceDataUrl : "",
             sourceName,
-            generatedPaths
+            generatedPaths,
+            mods
         );
 
         mods.index.Builder.updateExplorer();
-        rootPanel.select(
+        // Select the removable background, not the structural root panel.
+        // Pressing Delete immediately after reconstruction must therefore
+        // remove only the background and preserve the generated controls.
+        rootBackgroundResult.image.select(
             new MouseEvent("dblclick", {
                 bubbles: true,
                 cancelable: true,
@@ -15719,6 +15879,7 @@
         patchCopyPasteAutoChrome(mods);
         patchExplorerNames(mods);
         patchLayerOrderUndo(mods);
+        patchSafeRebuildDeletion(mods);
 
         installCopyPasteButtons(mods);
         installExpandedSidebar(mods);
