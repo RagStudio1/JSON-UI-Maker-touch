@@ -1,9 +1,13 @@
-JSON-UI-Maker Patch v28
-Build: v28-original-show-grid
+JSON-UI-Maker Patch v29
+Build: v29-full-original-grid-visuals
 
 SHOW GRID:
 - restaurado o comportamento original de SebTheSigma/JSON-UI-Maker
-- grid aparece somente durante o arraste, conforme a configuracao Show Grid
+- restaurado o grid 2x2 permanente que marca o centro da preview
+- restaurada a bolinha azul no centro do item enquanto ele e movido
+- restaurada a cor original das grades: rgb(55, 55, 55), linhas de 2px
+- painel selecionado mantem a grade visivel quando Show Grid esta ativo
+- ao mover um item, a grade do painel pai aparece durante o arraste
 - removida a camada magenta persistente que cobria detalhes das imagens
 - removida a varredura de todos os elementos a cada selecao/arraste
 - preservados os pontos, handles e hit testing originais

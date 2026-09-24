@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v27-layer-editor-fix";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v29-full-original-grid-visuals";
 
-    const BUILD = "v27-layer-editor-fix";
+    const BUILD = "v29-full-original-grid-visuals";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -453,6 +453,38 @@
 
         render();
         document.body.appendChild(button);
+    }
+
+    // Keep the preview's native 2x2 center grid intact. The upstream editor
+    // creates this grid independently from the Show Grid option; custom layer
+    // setup must not clear its CSS variables.
+    function installOriginalPreviewGrid(mods) {
+        const restore = () => {
+            const root = mods.config.rootElement;
+
+            if (!(root instanceof HTMLElement) || !root.isConnected) return;
+
+            const rootInstance = mods.index.GLOBAL_ELEMENT_MAP.get(
+                root.dataset.id
+            );
+
+            const grid = rootInstance?.gridElement;
+            if (!(grid instanceof HTMLElement)) return;
+
+            grid.classList.remove("rag-grid-visible");
+            grid.style.setProperty("--grid-cols", "2");
+            grid.style.setProperty("--grid-rows", "2");
+            grid.style.removeProperty("background-image");
+            grid.style.removeProperty("background-position");
+            grid.style.removeProperty("opacity");
+        };
+
+        restore();
+
+        new MutationObserver(restore).observe(mainWindow, {
+            childList: true,
+            subtree: true,
+        });
     }
 
     // ============================================================
@@ -10331,18 +10363,18 @@
 
 .gridable.rag-grid-visible {
     --rag-grid-line:
-        rgba(255, 0, 255, .56);
+        rgba(55, 55, 55, 1);
 
     background-image:
         linear-gradient(
             to right,
-            var(--rag-grid-line) 1px,
-            transparent 1px
+            var(--rag-grid-line) 2px,
+            transparent 2px
         ),
         linear-gradient(
             to bottom,
-            var(--rag-grid-line) 1px,
-            transparent 1px
+            var(--rag-grid-line) 2px,
+            transparent 2px
         ) !important;
 
     background-size:
@@ -10351,10 +10383,10 @@
         !important;
 
     background-position:
-        0 0 !important;
+        -1px -1px !important;
 
     opacity:
-        .78;
+        1;
 }
 
 
@@ -10862,6 +10894,19 @@
 [data-rag-fallback-active="true"] {
     outline-color: #d100d1 !important;
 }
+
+/* Match the original editor's blue center marker while keeping it above
+   the custom background/border/header layers. Display remains controlled by
+   the native startDrag/stopDrag methods. */
+#main_window .center-point {
+    width: 10px !important;
+    height: 10px !important;
+    border-radius: 50% !important;
+    background-color: blue !important;
+    opacity: 1 !important;
+    pointer-events: none !important;
+    z-index: 2147481000 !important;
+}
 `;
         document.head.appendChild(style);
     }
@@ -10941,6 +10986,8 @@
 
         window.__RAG_LAST_MODS_V22__ =
             mods;
+
+        installOriginalPreviewGrid(mods);
 
         await installNordicBuiltinAssets(
             mods
