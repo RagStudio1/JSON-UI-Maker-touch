@@ -1,20 +1,21 @@
-JSON-UI-Maker Patch v35
-Build: v35-image-role-selector
+JSON-UI-Maker Patch v36
+Build: v36-button-nine-slice-import
 
-SELETOR DE FUNCAO DA IMAGEM:
-- o seletor de assets agora pergunta como a imagem sera usada
-- opcoes: imagem normal/icone, background, borda/frame e header editavel
-- background preenche o painel selecionado, usa camada 10 e continua editavel
-- borda preenche o painel, usa camada 60 e nao bloqueia cliques internos
-- header cria um painel filho real na camada 120
-- apenas um background e uma borda ficam marcados por painel
-- a escolha volta para imagem normal depois de cada adicao
+TEXTURAS DE BOTAO IMPORTADAS:
+- PNGs usados em botoes agora recebem 9-slice como os assets internos
+- importacao aceita selecionar PNG + JSON sidecar ao mesmo tempo
+- sidecars com nineslice_size e base_size sao preservados exatamente
+- sem JSON, o editor gera margens 9-slice seguras automaticamente
+- 9-slice gerado fica salvo no navegador para os proximos carregamentos
+- nova opcao Textura de botao (9-slice) no seletor de assets
+- imagens gallery/ ja importadas recebem 9-slice ao serem usadas em botoes
 
-CONVERSAO DE IMAGENS EXISTENTES:
-- propriedades da imagem agora incluem FUNCAO DA IMAGEM
-- uma imagem ja adicionada pode virar background, borda ou header
-- background e borda podem voltar a ser imagens normais
-- Explorer atualiza os nomes para BACKGROUND, BORDER e IMAGE
+LABEL DO BOTAO:
+- label permanece centralizado em default, hover e pressed
+- carregamento atrasado da fonte nao desloca mais o texto
+- redimensionar ou trocar estado mantem o centro
+- mover o label manualmente desativa apenas o centro automatico daquele botao
+- offsets personalizados de forms importados continuam preservados
 
-Mantem V34 botoes compostos, V33 fallbacks legiveis, V32 Selection Drag
-Lock, V31 round-trip, V30 Explorer Mobile + Panel Lock e V29 Show Grid.
+Mantem V35 seletor de funcao da imagem, V34 botoes compostos, V33 fallbacks,
+V32 Selection Drag Lock, V31 round-trip e V30 Explorer Mobile + Panel Lock.
