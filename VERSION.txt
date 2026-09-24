@@ -1,5 +1,21 @@
-JSON-UI-Maker Patch v29
-Build: v29-full-original-grid-visuals
+JSON-UI-Maker Patch v30
+Build: v30-explorer-panel-lock
+
+EXPLORER MOBILE:
+- lista de itens em painel fixo completo no lado direito
+- altura total da tela, sem limite antigo de 381px
+- scroll vertical e horizontal nativo no Android
+- arrastar a lista nao seleciona itens por acidente
+- painel pode ser recolhido e reaberto pelo botao ITENS
+- alvos touch maiores e contador de itens
+
+PANEL LOCK:
+- nova opcao Panel Lock (Smart Align) nas configuracoes
+- alinha itens do mesmo painel por bordas e centros
+- tambem alinha ao centro e as bordas do painel pai
+- raio de encaixe configuravel em Panel Lock Radius
+- guias azuis mostram o eixo sincronizado durante o arraste
+- funciona junto ou separado do Grid Lock
 
 SHOW GRID:
 - restaurado o comportamento original de SebTheSigma/JSON-UI-Maker

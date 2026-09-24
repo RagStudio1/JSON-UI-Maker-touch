@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v29-full-original-grid-visuals";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v30-explorer-panel-lock";
 
-    const BUILD = "v29-full-original-grid-visuals";
+    const BUILD = "v30-explorer-panel-lock";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -46,6 +46,7 @@
     let lastY = 0;
     let dragStarted = false;
     let suppressCompatMouseUntil = 0;
+    const explorerTouchStarts = new Map();
 
     let imageParentLock = null;
     let modulesPromise = null;
@@ -406,9 +407,32 @@
         resetGesture();
     }
 
-    function explorerPointerUp(event) {
+    function explorerPointerDown(event) {
         if (!editMode || event.pointerType === "mouse") return;
-        if (!(event.target instanceof Element)) return;
+
+        explorerTouchStarts.set(event.pointerId, {
+            x: event.clientX,
+            y: event.clientY,
+        });
+    }
+
+    function explorerPointerUp(event) {
+        if (event.pointerType === "mouse") return;
+
+        const start = explorerTouchStarts.get(event.pointerId);
+        explorerTouchStarts.delete(event.pointerId);
+
+        if (
+            !editMode ||
+            !(event.target instanceof Element) ||
+            !start ||
+            Math.hypot(
+                event.clientX - start.x,
+                event.clientY - start.y
+            ) > 8
+        ) {
+            return;
+        }
 
         const text = event.target.closest(".explorerText");
         if (!text) return;
@@ -420,6 +444,10 @@
             event.clientX,
             event.clientY
         );
+    }
+
+    function explorerPointerCancel(event) {
+        explorerTouchStarts.delete(event.pointerId);
     }
 
     function installTouchModeButton() {
@@ -3447,6 +3475,189 @@
                 enableDefaultClipping,
             clamp:
                 clampChild,
+        };
+    }
+
+    // Smart alignment between elements that share the same parent panel.
+    // This is deliberately separate from Grid Lock: Grid Lock snaps to fixed
+    // cells, while Panel Lock snaps to sibling and parent edges/centers.
+    function patchPanelLock(mods) {
+        const shared = mods.ElementSharedFuncs;
+
+        if (!shared || shared.__ragPanelLockV30) return;
+        shared.__ragPanelLockV30 = true;
+
+        if (!mods.config.settings.panel_lock) {
+            mods.config.settings.panel_lock = {
+                type: "checkbox",
+                editable: true,
+                value: false,
+                displayName: "Panel Lock (Smart Align)",
+            };
+        }
+
+        if (!mods.config.settings.panel_lock_radius) {
+            mods.config.settings.panel_lock_radius = {
+                type: "number",
+                editable: true,
+                value: 12,
+                displayName: "Panel Lock Radius",
+            };
+        }
+
+        const activeGuides = [];
+
+        const clearGuides = () => {
+            while (activeGuides.length) {
+                activeGuides.pop()?.remove();
+            }
+        };
+
+        const addGuide = (parent, axis, position) => {
+            const guide = document.createElement("div");
+            guide.className = `rag-panel-lock-guide rag-panel-lock-${axis}`;
+            guide.dataset.axis = axis.toUpperCase();
+
+            if (axis === "x") {
+                guide.style.left = `${position}px`;
+            } else {
+                guide.style.top = `${position}px`;
+            }
+
+            parent.appendChild(guide);
+            activeGuides.push(guide);
+        };
+
+        const nearest = (current, candidates, radius) => {
+            let match = null;
+
+            for (const candidate of candidates) {
+                const distance = Math.abs(candidate.value - current);
+
+                if (distance <= radius && (!match || distance < match.distance)) {
+                    match = {
+                        ...candidate,
+                        distance,
+                    };
+                }
+            }
+
+            return match;
+        };
+
+        const originalDrag = shared.drag;
+
+        shared.drag = function (event, classElement, mainElement) {
+            const result = originalDrag.call(
+                this,
+                event,
+                classElement,
+                mainElement
+            );
+
+            clearGuides();
+
+            if (
+                !mods.config.settings.panel_lock.value ||
+                !classElement?.isDragging ||
+                classElement?.isResizing
+            ) {
+                return result;
+            }
+
+            const element =
+                mainElement || classElement?.getMainHTMLElement?.();
+            const parent = classElement?.container;
+
+            if (!(element instanceof HTMLElement) || !(parent instanceof HTMLElement)) {
+                return result;
+            }
+
+            const width = element.offsetWidth || element.getBoundingClientRect().width;
+            const height = element.offsetHeight || element.getBoundingClientRect().height;
+            const parentWidth = parent.clientWidth || parent.getBoundingClientRect().width;
+            const parentHeight = parent.clientHeight || parent.getBoundingClientRect().height;
+            const left = parseFloat(element.style.left) || 0;
+            const top = parseFloat(element.style.top) || 0;
+            const radius = Math.max(
+                1,
+                Number(mods.config.settings.panel_lock_radius.value) || 12
+            );
+
+            const xCandidates = [
+                { value: 0, guide: 0 },
+                { value: (parentWidth - width) / 2, guide: parentWidth / 2 },
+                { value: parentWidth - width, guide: parentWidth },
+            ];
+            const yCandidates = [
+                { value: 0, guide: 0 },
+                { value: (parentHeight - height) / 2, guide: parentHeight / 2 },
+                { value: parentHeight - height, guide: parentHeight },
+            ];
+
+            for (const instance of mods.index.GLOBAL_ELEMENT_MAP.values()) {
+                if (instance === classElement || instance?.container !== parent) continue;
+
+                const sibling = instance?.getMainHTMLElement?.();
+                if (!(sibling instanceof HTMLElement) || sibling === element) continue;
+                if (sibling.style.visibility === "hidden" || sibling.dataset.ragFixedDecorative === "true") continue;
+
+                const siblingLeft = parseFloat(sibling.style.left) || 0;
+                const siblingTop = parseFloat(sibling.style.top) || 0;
+                const siblingWidth = sibling.offsetWidth || sibling.getBoundingClientRect().width;
+                const siblingHeight = sibling.offsetHeight || sibling.getBoundingClientRect().height;
+
+                xCandidates.push(
+                    { value: siblingLeft, guide: siblingLeft },
+                    {
+                        value: siblingLeft + (siblingWidth - width) / 2,
+                        guide: siblingLeft + siblingWidth / 2,
+                    },
+                    {
+                        value: siblingLeft + siblingWidth - width,
+                        guide: siblingLeft + siblingWidth,
+                    }
+                );
+
+                yCandidates.push(
+                    { value: siblingTop, guide: siblingTop },
+                    {
+                        value: siblingTop + (siblingHeight - height) / 2,
+                        guide: siblingTop + siblingHeight / 2,
+                    },
+                    {
+                        value: siblingTop + siblingHeight - height,
+                        guide: siblingTop + siblingHeight,
+                    }
+                );
+            }
+
+            const xMatch = nearest(left, xCandidates, radius);
+            const yMatch = nearest(top, yCandidates, radius);
+
+            if (xMatch) {
+                element.style.left = `${xMatch.value}px`;
+                addGuide(parent, "x", xMatch.guide);
+            }
+
+            if (yMatch) {
+                element.style.top = `${yMatch.value}px`;
+                addGuide(parent, "y", yMatch.guide);
+            }
+
+            return result;
+        };
+
+        const originalStopDrag = shared.stopDrag;
+
+        shared.stopDrag = function (...args) {
+            const result = originalStopDrag.apply(this, args);
+            clearGuides();
+            return result;
+        };
+
+        window.__RAG_PANEL_LOCK__ = {
+            clearGuides,
         };
     }
 
@@ -8255,6 +8466,58 @@
         );
     }
 
+    function installExplorerDock() {
+        const explorer = document.getElementById("explorer");
+
+        if (!explorer || document.querySelector(".rag-explorer-dock")) return;
+
+        const dock = document.createElement("aside");
+        dock.className = "rag-explorer-dock";
+
+        const header = document.createElement("div");
+        header.className = "rag-explorer-dock-header";
+
+        const title = document.createElement("strong");
+        title.textContent = "ITENS / CAMADAS";
+
+        const count = document.createElement("span");
+        count.className = "rag-explorer-count";
+
+        const close = document.createElement("button");
+        close.type = "button";
+        close.className = "rag-explorer-close";
+        close.textContent = "RECOLHER";
+
+        const reopen = document.createElement("button");
+        reopen.type = "button";
+        reopen.className = "rag-explorer-reopen";
+        reopen.textContent = "ITENS";
+
+        const updateCount = () => {
+            count.textContent = `${explorer.querySelectorAll(".explorerDiv").length} itens`;
+        };
+
+        const setOpen = (open) => {
+            dock.classList.toggle("is-collapsed", !open);
+            reopen.classList.toggle("is-visible", !open);
+        };
+
+        close.addEventListener("click", () => setOpen(false));
+        reopen.addEventListener("click", () => setOpen(true));
+
+        header.append(title, count, close);
+        dock.append(header, explorer);
+        document.body.append(dock, reopen);
+
+        new MutationObserver(updateCount).observe(explorer, {
+            childList: true,
+            subtree: true,
+        });
+
+        updateCount();
+        setOpen(true);
+    }
+
     // ============================================================
     // TEXTURE CROP / EXTRACT EDITOR V17
     // Select any rectangular region from an imported texture and either:
@@ -10895,6 +11158,150 @@
     outline-color: #d100d1 !important;
 }
 
+.rag-explorer-dock {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 2147482000;
+    display: flex;
+    flex-direction: column;
+    width: clamp(300px, 34vw, 440px);
+    height: calc(100vh - 24px);
+    height: calc(100dvh - 24px);
+    min-height: 320px;
+    overflow: hidden;
+    border: 2px solid rgba(166, 66, 222, .85);
+    border-radius: 12px;
+    background: rgba(28, 28, 32, .97);
+    box-shadow: 0 12px 38px rgba(0, 0, 0, .55);
+}
+
+.rag-explorer-dock.is-collapsed {
+    display: none;
+}
+
+.rag-explorer-dock-header {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 8px;
+    min-height: 48px;
+    padding: 8px 10px;
+    color: white;
+    background: linear-gradient(135deg, #4a1666, #7a1e91);
+}
+
+.rag-explorer-count {
+    color: #d9b4ec;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.rag-explorer-close,
+.rag-explorer-reopen {
+    min-height: 34px;
+    padding: 7px 10px;
+    border: 1px solid rgba(255, 255, 255, .35);
+    border-radius: 7px;
+    background: #29292e;
+    color: white;
+    font-weight: 900;
+    touch-action: manipulation;
+}
+
+.rag-explorer-reopen {
+    position: fixed;
+    top: 70px;
+    right: 12px;
+    z-index: 2147482000;
+    display: none;
+    min-width: 76px;
+    min-height: 46px;
+    border-color: #a542de;
+    background: rgba(35, 25, 42, .97);
+}
+
+.rag-explorer-reopen.is-visible {
+    display: block;
+}
+
+.rag-explorer-dock > .explorer {
+    flex: 1 1 auto;
+    width: auto !important;
+    height: auto !important;
+    max-width: none !important;
+    max-height: none !important;
+    min-height: 0;
+    margin: 8px !important;
+    overflow-x: auto !important;
+    overflow-y: auto !important;
+    overscroll-behavior: contain;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: #a542de #27272b;
+}
+
+.rag-explorer-dock .explorerDiv {
+    min-height: 28px;
+}
+
+.rag-explorer-dock .explorerText {
+    display: inline-block;
+    min-height: 28px;
+    line-height: 28px;
+    white-space: nowrap;
+}
+
+.rag-panel-lock-guide {
+    position: absolute;
+    z-index: 2147481500;
+    pointer-events: none;
+    background: #00d9ff;
+    box-shadow: 0 0 5px rgba(0, 217, 255, .9);
+}
+
+.rag-panel-lock-x {
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    transform: translateX(-1px);
+}
+
+.rag-panel-lock-y {
+    left: 0;
+    right: 0;
+    height: 2px;
+    transform: translateY(-1px);
+}
+
+@media (pointer: coarse) {
+    .rag-explorer-dock {
+        width: min(92vw, 440px);
+    }
+
+    .rag-explorer-dock-header {
+        min-height: 56px;
+    }
+
+    .rag-explorer-close,
+    .rag-explorer-reopen {
+        min-height: 46px;
+    }
+
+    .rag-explorer-dock .explorerDiv,
+    .rag-explorer-dock .explorerText {
+        min-height: 42px;
+        line-height: 42px;
+    }
+
+    .rag-explorer-dock .explorerArrow,
+    .rag-explorer-dock .explorerVisibilityToggle {
+        min-width: 28px;
+        min-height: 28px;
+    }
+}
+
 /* Match the original editor's blue center marker while keeping it above
    the custom background/border/header layers. Display remains controlled by
    the native startDrag/stopDrag methods. */
@@ -10974,8 +11381,24 @@
             document
                 .getElementById("explorer")
                 ?.addEventListener(
+                    "pointerdown",
+                    explorerPointerDown,
+                    { passive: true }
+                );
+
+            document
+                .getElementById("explorer")
+                ?.addEventListener(
                     "pointerup",
                     explorerPointerUp,
+                    { passive: true }
+                );
+
+            document
+                .getElementById("explorer")
+                ?.addEventListener(
+                    "pointercancel",
+                    explorerPointerCancel,
                     { passive: true }
                 );
 
@@ -10996,12 +11419,14 @@
         patchClipsChildrenExport(mods);
         patchAdvancedControlExport(mods);
         patchNestedPanelDrag(mods);
+        patchPanelLock(mods);
         patchCopyPasteMetadata(mods);
         patchCopyPasteAutoChrome(mods);
         patchExplorerNames(mods);
 
         installCopyPasteButtons(mods);
         installExpandedSidebar(mods);
+        installExplorerDock();
 
         await installImageParentLock();
         installFilePicker();
