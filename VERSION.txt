@@ -1,5 +1,15 @@
-JSON-UI-Maker Patch v32
-Build: v32-selected-drag-lock
+JSON-UI-Maker Patch v33
+Build: v33-readable-texture-fallbacks
+
+FALLBACK DE TEXTURAS:
+- removido o xadrez magenta repetitivo que escondia a estrutura da UI
+- cada textura ausente recebe cor estavel e categoria visual propria
+- fallback mostra tipo, nome e caminho da textura ausente
+- etiqueta nitida permanece legivel sobre o elemento no editor
+- contorno amarelo tracejado identifica elementos incompletos
+- painel recolhivel lista todos os caminhos ausentes para importacao
+- a lista e limpa e recalculada a cada novo form importado
+- ao fornecer a textura correta, etiqueta e aviso sao removidos
 
 SELECTION DRAG LOCK:
 - somente o item atualmente selecionado pode ser movido

@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v32-selected-drag-lock";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v33-readable-texture-fallbacks";
 
-    const BUILD = "v32-selected-drag-lock";
+    const BUILD = "v33-readable-texture-fallbacks";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -1494,6 +1494,8 @@
                 this.canvasHolder.dataset.imagePath = path;
                 this.canvasHolder.dataset.ragFallbackActive =
                     state.__ragFallback ? "true" : "false";
+
+                decorateMissingTexture(this, path, state);
             };
         }
 
@@ -1621,47 +1623,160 @@
         );
     }
 
+    function fallbackKind(path) {
+        const value = normalizeTexture(path).toLowerCase();
+
+        if (/(background|(^|[\/_-])bg([\/_-]|$))/.test(value)) return "BG";
+        if (/(border|frame)/.test(value)) return "BORDER";
+        if (/(button|btn)/.test(value)) return "BUTTON";
+        if (/(skin|portrait|avatar|doll)/.test(value)) return "SKIN";
+        if (/(icon|glyph|symbol)/.test(value)) return "ICON";
+        return "TEXTURE";
+    }
+
+    function fallbackHue(path) {
+        let hash = 2166136261;
+
+        for (const character of normalizeTexture(path)) {
+            hash ^= character.charCodeAt(0);
+            hash = Math.imul(hash, 16777619);
+        }
+
+        return Math.abs(hash) % 360;
+    }
+
     function makeFallbackImageData(label) {
         const canvas = document.createElement("canvas");
-        canvas.width = 128;
-        canvas.height = 128;
+        canvas.width = 320;
+        canvas.height = 180;
 
         const ctx = canvas.getContext("2d", {
             willReadFrequently: true,
         });
 
-        for (let y = 0; y < 128; y += 16) {
-            for (let x = 0; x < 128; x += 16) {
-                ctx.fillStyle =
-                    ((x / 16 + y / 16) % 2)
-                        ? "#202024"
-                        : "#d100d1";
-                ctx.fillRect(x, y, 16, 16);
-            }
+        const path = normalizeTexture(label);
+        const name = baseName(path) || "unknown_texture";
+        const kind = fallbackKind(path);
+        const hue = fallbackHue(path);
+
+        ctx.fillStyle = `hsl(${hue} 26% 15%)`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.strokeStyle = `hsla(${hue} 68% 62% / .18)`;
+        ctx.lineWidth = 12;
+
+        for (let x = -180; x < 500; x += 46) {
+            ctx.beginPath();
+            ctx.moveTo(x, 180);
+            ctx.lineTo(x + 180, 0);
+            ctx.stroke();
         }
 
-        ctx.strokeStyle = "#fff";
-        ctx.lineWidth = 7;
-        ctx.beginPath();
-        ctx.moveTo(18, 18);
-        ctx.lineTo(110, 110);
-        ctx.moveTo(110, 18);
-        ctx.lineTo(18, 110);
-        ctx.stroke();
+        ctx.strokeStyle = `hsl(${hue} 75% 68%)`;
+        ctx.lineWidth = 5;
+        ctx.setLineDash([14, 9]);
+        ctx.strokeRect(5, 5, 310, 170);
+        ctx.setLineDash([]);
 
-        ctx.fillStyle = "rgba(0,0,0,.82)";
-        ctx.fillRect(0, 92, 128, 36);
+        ctx.fillStyle = `hsl(${hue} 55% 32%)`;
+        ctx.fillRect(18, 18, 92, 52);
 
         ctx.fillStyle = "#fff";
-        ctx.font = "bold 9px sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText(
-            baseName(label).slice(0, 18) || "MISSING",
-            64,
-            113
-        );
+        ctx.font = "900 21px sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText(kind, 29, 51, 72);
 
-        return ctx.getImageData(0, 0, 128, 128);
+        ctx.fillStyle = "rgba(0, 0, 0, .72)";
+        ctx.fillRect(18, 84, 284, 76);
+
+        ctx.fillStyle = "#ffcf66";
+        ctx.font = "900 17px sans-serif";
+        ctx.fillText("MISSING TEXTURE", 30, 110, 260);
+
+        ctx.fillStyle = "#fff";
+        ctx.font = "700 15px monospace";
+        ctx.fillText(name.slice(0, 28), 30, 136, 260);
+
+        ctx.fillStyle = "rgba(255, 255, 255, .68)";
+        ctx.font = "11px monospace";
+        ctx.fillText(path.slice(0, 43), 30, 153, 260);
+
+        return ctx.getImageData(0, 0, canvas.width, canvas.height);
+    }
+
+    function decorateMissingTexture(instance, requested, state) {
+        const holder = instance?.canvasHolder;
+        if (!(holder instanceof HTMLElement)) return;
+
+        holder
+            .querySelector(":scope > .rag-missing-texture-label")
+            ?.remove();
+
+        const missing = Boolean(state?.__ragFallback);
+        holder.dataset.ragFallbackActive = String(missing);
+        holder.dataset.ragRequestedTexture = normalizeTexture(requested);
+
+        if (!missing) return;
+
+        const label = document.createElement("div");
+        label.className = "rag-missing-texture-label";
+        label.dataset.skip = "true";
+        label.title = `Textura ausente: textures/${normalizeTexture(requested)}`;
+
+        const kind = document.createElement("b");
+        kind.textContent = `${fallbackKind(requested)} AUSENTE`;
+
+        const path = document.createElement("span");
+        path.textContent = normalizeTexture(requested);
+
+        label.append(kind, path);
+        holder.appendChild(label);
+    }
+
+    function updateMissingTexturePanel() {
+        let panel = document.querySelector(".rag-missing-textures-panel");
+        const paths = [...universalState.missingPaths].sort();
+
+        if (!paths.length) {
+            panel?.remove();
+            return;
+        }
+
+        if (!panel) {
+            panel = document.createElement("details");
+            panel.className = "rag-missing-textures-panel";
+            document.body.appendChild(panel);
+        }
+
+        panel.innerHTML = "";
+
+        const summary = document.createElement("summary");
+        summary.textContent = `TEXTURAS AUSENTES: ${paths.length}`;
+
+        const intro = document.createElement("div");
+        intro.className = "rag-missing-textures-intro";
+        intro.textContent = "Importe estas texturas mantendo os mesmos caminhos:";
+
+        const list = document.createElement("div");
+        list.className = "rag-missing-textures-list";
+
+        for (const path of paths) {
+            const row = document.createElement("code");
+            row.textContent = `textures/${path}.png`;
+            list.appendChild(row);
+        }
+
+        panel.append(summary, intro, list);
+    }
+
+    function scheduleMissingTexturePanelUpdate() {
+        if (scheduleMissingTexturePanelUpdate.pending) return;
+        scheduleMissingTexturePanelUpdate.pending = true;
+
+        queueMicrotask(() => {
+            scheduleMissingTexturePanelUpdate.pending = false;
+            updateMissingTexturePanel();
+        });
     }
 
     function findLoadedByBasename(images, requested) {
@@ -1723,6 +1838,7 @@
 
         if (exact?.png && !exact.__ragFallback) {
             universalState.missingPaths.delete(requested);
+            scheduleMissingTexturePanelUpdate();
             return exact;
         }
 
@@ -1734,6 +1850,7 @@
         if (loaded) {
             images.set(requested, loaded);
             universalState.missingPaths.delete(requested);
+            scheduleMissingTexturePanelUpdate();
             return loaded;
         }
 
@@ -1756,6 +1873,7 @@
                 );
 
                 universalState.missingPaths.delete(requested);
+                scheduleMissingTexturePanelUpdate();
                 return state;
             }
         }
@@ -1768,6 +1886,7 @@
 
         images.set(requested, fallback);
         universalState.missingPaths.add(requested);
+        scheduleMissingTexturePanelUpdate();
 
         return fallback;
     }
@@ -1820,6 +1939,8 @@
                 requestAnimationFrame(resolve)
             );
         }
+
+        updateMissingTexturePanel();
     }
 
     // ============================================================
@@ -2309,6 +2430,7 @@
             instance.canvasHolder.dataset.ragKeepAspect = "false";
             instance.canvasHolder.dataset.ragFallbackActive =
                 state.__ragFallback ? "true" : "false";
+            decorateMissingTexture(instance, requested, state);
             instance.bindings = bindingsString(json);
         } else if (type === "label") {
             const id = newId();
@@ -2906,6 +3028,7 @@
             throw new Error("JSON invalido.");
         }
 
+        universalState.missingPaths.clear();
         await prepareTextures(parsed);
 
         if (isNativeEditorJson(parsed)) {
@@ -5369,6 +5492,12 @@
 
             const element = instance.canvasHolder;
             const texture = String(element.dataset.imagePath || "").toLowerCase();
+            const textureState = mods.index.images.get(
+                normalizeTexture(texture)
+            );
+
+            decorateMissingTexture(instance, texture, textureState);
+
             const layer = Number(element.style.zIndex) || 0;
             const parentRect = element.parentElement?.getBoundingClientRect();
             const rect = element.getBoundingClientRect();
@@ -9968,6 +10097,7 @@
 
         instance.changeImage(path);
         instance.canvasHolder.dataset.ragFallbackActive = "false";
+        updateMissingTexturePanel();
     }
 
     async function updatePropertyExtras() {
@@ -11392,7 +11522,88 @@
 }
 
 [data-rag-fallback-active="true"] {
-    outline-color: #d100d1 !important;
+    outline: 3px dashed #ffbd3d !important;
+}
+
+.rag-missing-texture-label {
+    position: absolute;
+    top: 5px;
+    left: 5px;
+    z-index: 2147480900;
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    max-width: calc(100% - 10px);
+    max-height: calc(100% - 10px);
+    padding: 4px 7px;
+    overflow: hidden;
+    border: 1px solid #ffbd3d;
+    border-radius: 4px;
+    background: rgba(18, 18, 21, .9);
+    color: white;
+    font: 800 9px/1.25 monospace;
+    pointer-events: none;
+}
+
+.rag-missing-texture-label b {
+    color: #ffcf66;
+    white-space: nowrap;
+}
+
+.rag-missing-texture-label span {
+    overflow: hidden;
+    color: #fff;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rag-missing-textures-panel {
+    position: fixed;
+    left: 12px;
+    bottom: 12px;
+    z-index: 2147482100;
+    width: min(430px, calc(100vw - 24px));
+    max-height: min(62vh, 520px);
+    overflow: hidden;
+    border: 2px solid #d58b19;
+    border-radius: 9px;
+    background: rgba(25, 25, 29, .97);
+    color: white;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+}
+
+.rag-missing-textures-panel summary {
+    padding: 12px 14px;
+    background: #65420d;
+    color: #ffd98c;
+    font: 900 12px/1.2 sans-serif;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+
+.rag-missing-textures-intro {
+    padding: 10px 12px 5px;
+    color: #ddd;
+    font-size: 11px;
+}
+
+.rag-missing-textures-list {
+    max-height: min(48vh, 390px);
+    padding: 6px 10px 12px;
+    overflow: auto;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+}
+
+.rag-missing-textures-list code {
+    display: block;
+    margin: 4px 0;
+    padding: 6px 8px;
+    overflow-wrap: anywhere;
+    border-radius: 4px;
+    background: #353238;
+    color: #ffe0a3;
+    font-size: 10px;
 }
 
 .rag-explorer-dock {
