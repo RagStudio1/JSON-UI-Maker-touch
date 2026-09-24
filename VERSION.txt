@@ -1,18 +1,17 @@
-JSON-UI-Maker Patch v39
-Build: v39-native-nine-slice-matching
+JSON-UI-Maker Patch v40
+Build: v40-image-to-ui-rebuilder
 
-IMPORTACAO IGUAL AOS ASSETS:
-- compara o PNG importado pixel por pixel com os presets nativos
-- uma copia do red_default_background recebe exatamente [2,2,2,5]
-- o sidecar oficial encontrado e salvo junto da textura importada
-- background, borda e header usam o mesmo renderizador 9-slice dos assets
-- funciona na importacao nova e na conversao de uma imagem ja existente
-- trocar a textura de um background/header preserva o 9-slice correto
+IMAGEM -> UI:
+- importa PNG, JPG ou WEBP e analisa tudo localmente no navegador
+- detecta paineis, headers, botoes e imagens por bordas, cor e repeticao
+- editor visual permite criar, mover, redimensionar, excluir e reclassificar regioes
+- funcao AREA DA UI recorta barras do navegador e partes externas da captura
+- gera hierarquia editavel com paineis aninhados, botoes reais e texturas recortadas
+- recompõe o fundo removendo aproximadamente as regioes extraidas para reduzir fantasmas
+- referencia transparente opcional com controle de visibilidade e opacidade
+- a referencia e somente do editor e nunca entra no JSON exportado
+- botao BAIXAR ASSETS ZIP entrega todas as texturas geradas com seus caminhos
+- texturas geradas sao registradas e salvas localmente quando houver espaco
 
-TEXTURAS SEM PRESET EQUIVALENTE:
-- background, borda e header recebem margens 9-slice proprias
-- botao continua usando margens especificas de botao
-- cada funcao mantem seu proprio comportamento de escala
-
-Mantem V38 tamanho inicial dos botoes, V35 seletor de funcao da imagem,
-V34 botoes compostos, V33 fallbacks e V32 Selection Drag Lock.
+Mantem a importacao 9-slice nativa da V39, tamanho de botoes da V38,
+seletor de funcao da V35, botoes compostos, fallbacks e Selection Drag Lock.

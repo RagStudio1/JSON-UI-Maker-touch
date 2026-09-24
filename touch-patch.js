@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v39-native-nine-slice-matching";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v40-image-to-ui-rebuilder";
 
-    const BUILD = "v39-native-nine-slice-matching";
+    const BUILD = "v40-image-to-ui-rebuilder";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -9945,6 +9945,1636 @@
     }
 
     // ============================================================
+    // IMAGE -> EDITABLE UI REBUILDER V40
+    // Local screenshot analysis plus a manual region editor. The source
+    // screenshot is never sent to a server and its reference layer is marked
+    // editor-only so it cannot leak into exported JSON UI.
+    // ============================================================
+
+    const rebuildRoleLabels = new Map([
+        ["root", "AREA DA UI (recortar)"],
+        ["panel", "Painel / container"],
+        ["header", "Header"],
+        ["button", "Botao"],
+        ["image", "Imagem / decoracao"],
+        ["label", "Texto (placeholder)"],
+        ["ignore", "Ignorar"],
+    ]);
+
+    const rebuildGeneratedAssets = new Map();
+    let rebuildCrcTable = null;
+    const rebuildPanelBackgrounds = new WeakMap();
+    let rebuildPanelResizeObserver = null;
+
+    function rebuildArea(rect) {
+        return Math.max(1, rect.r - rect.l) *
+            Math.max(1, rect.b - rect.t);
+    }
+
+    function rebuildContains(outer, inner, tolerance = 2) {
+        return (
+            outer.l <= inner.l + tolerance &&
+            outer.t <= inner.t + tolerance &&
+            outer.r >= inner.r - tolerance &&
+            outer.b >= inner.b - tolerance
+        );
+    }
+
+    function rebuildIntersection(a, b) {
+        const width = Math.max(0, Math.min(a.r, b.r) - Math.max(a.l, b.l));
+        const height = Math.max(0, Math.min(a.b, b.b) - Math.max(a.t, b.t));
+        return width * height;
+    }
+
+    function rebuildIou(a, b) {
+        const intersection = rebuildIntersection(a, b);
+        return intersection /
+            Math.max(1, rebuildArea(a) + rebuildArea(b) - intersection);
+    }
+
+    function rebuildPixelDifference(data, first, second) {
+        return Math.max(
+            Math.abs(data[first] - data[second]),
+            Math.abs(data[first + 1] - data[second + 1]),
+            Math.abs(data[first + 2] - data[second + 2])
+        );
+    }
+
+    function rebuildLineRuns(edgeMap, width, height, horizontal, minLength) {
+        const lines = [];
+        const major = horizontal ? height : width;
+        const minor = horizontal ? width : height;
+
+        for (let majorIndex = 0; majorIndex < major; majorIndex++) {
+            let start = -1;
+            let lastStrong = -1;
+            let gap = 0;
+
+            const finish = () => {
+                if (
+                    start >= 0 &&
+                    lastStrong - start + 1 >= minLength
+                ) {
+                    lines.push({
+                        p: majorIndex,
+                        a: start,
+                        b: lastStrong + 1,
+                        length: lastStrong - start + 1,
+                    });
+                }
+
+                start = -1;
+                lastStrong = -1;
+                gap = 0;
+            };
+
+            for (let minorIndex = 0; minorIndex < minor; minorIndex++) {
+                const x = horizontal ? minorIndex : majorIndex;
+                const y = horizontal ? majorIndex : minorIndex;
+                const strong = edgeMap[y * width + x] === 1;
+
+                if (strong) {
+                    if (start < 0) start = minorIndex;
+                    lastStrong = minorIndex;
+                    gap = 0;
+                } else if (start >= 0) {
+                    gap++;
+                    if (gap > 2) finish();
+                }
+            }
+
+            finish();
+        }
+
+        lines.sort((a, b) => b.length - a.length);
+
+        const compact = [];
+
+        for (const line of lines) {
+            const duplicate = compact.some(
+                (kept) =>
+                    Math.abs(kept.p - line.p) <= 2 &&
+                    Math.abs(kept.a - line.a) <= 3 &&
+                    Math.abs(kept.b - line.b) <= 3
+            );
+
+            if (!duplicate) compact.push(line);
+            if (compact.length >= 900) break;
+        }
+
+        return compact;
+    }
+
+    function rebuildSideSupport(edgeMap, width, height, x, top, bottom) {
+        let strong = 0;
+        let total = 0;
+
+        for (let y = Math.max(0, top); y < Math.min(height, bottom); y++) {
+            total++;
+
+            for (let offset = -2; offset <= 2; offset++) {
+                const sampleX = Math.max(0, Math.min(width - 1, x + offset));
+                if (edgeMap[y * width + sampleX]) {
+                    strong++;
+                    break;
+                }
+            }
+        }
+
+        return strong / Math.max(1, total);
+    }
+
+    function rebuildColorRegions(imageData, sensitivity, minSide) {
+        const { width, height, data } = imageData;
+        const bucket = Math.max(10, Math.min(40, Math.round(sensitivity * 0.8)));
+        const keys = new Uint32Array(width * height);
+        const visited = new Uint8Array(width * height);
+        const queue = new Int32Array(width * height);
+
+        for (let index = 0; index < width * height; index++) {
+            const offset = index * 4;
+            const r = Math.floor(data[offset] / bucket);
+            const g = Math.floor(data[offset + 1] / bucket);
+            const b = Math.floor(data[offset + 2] / bucket);
+            keys[index] = (r << 16) | (g << 8) | b;
+        }
+
+        const regions = [];
+        const minimumArea = Math.max(24, minSide * minSide * 0.7);
+
+        for (let seed = 0; seed < width * height; seed++) {
+            if (visited[seed]) continue;
+
+            const key = keys[seed];
+            let head = 0;
+            let tail = 0;
+            let count = 0;
+            let left = width;
+            let right = 0;
+            let top = height;
+            let bottom = 0;
+
+            visited[seed] = 1;
+            queue[tail++] = seed;
+
+            while (head < tail) {
+                const index = queue[head++];
+                const x = index % width;
+                const y = Math.floor(index / width);
+
+                count++;
+                left = Math.min(left, x);
+                right = Math.max(right, x + 1);
+                top = Math.min(top, y);
+                bottom = Math.max(bottom, y + 1);
+
+                const neighbors = [
+                    x > 0 ? index - 1 : -1,
+                    x + 1 < width ? index + 1 : -1,
+                    y > 0 ? index - width : -1,
+                    y + 1 < height ? index + width : -1,
+                ];
+
+                for (const neighbor of neighbors) {
+                    if (
+                        neighbor >= 0 &&
+                        !visited[neighbor] &&
+                        keys[neighbor] === key
+                    ) {
+                        visited[neighbor] = 1;
+                        queue[tail++] = neighbor;
+                    }
+                }
+            }
+
+            const regionWidth = right - left;
+            const regionHeight = bottom - top;
+            const boxArea = regionWidth * regionHeight;
+            const fill = count / Math.max(1, boxArea);
+
+            if (
+                count >= minimumArea &&
+                regionWidth >= minSide &&
+                regionHeight >= minSide &&
+                fill >= 0.62 &&
+                boxArea < width * height * 0.9
+            ) {
+                regions.push({
+                    l: left,
+                    t: top,
+                    r: right,
+                    b: bottom,
+                    score: Math.min(0.92, 0.45 + fill * 0.45),
+                    detector: "color",
+                });
+            }
+        }
+
+        return regions;
+    }
+
+    function analyzeScreenshotRegions(source, sensitivity = 30, minPercent = 3) {
+        const analysisScale = Math.min(
+            1,
+            480 / Math.max(source.width, source.height)
+        );
+        const width = Math.max(2, Math.round(source.width * analysisScale));
+        const height = Math.max(2, Math.round(source.height * analysisScale));
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+
+        const sourceCanvas = document.createElement("canvas");
+        sourceCanvas.width = source.width;
+        sourceCanvas.height = source.height;
+        sourceCanvas.getContext("2d").putImageData(source, 0, 0);
+
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        context.imageSmoothingEnabled = true;
+        context.drawImage(sourceCanvas, 0, 0, width, height);
+        const small = context.getImageData(0, 0, width, height);
+        const horizontalEdges = new Uint8Array(width * height);
+        const verticalEdges = new Uint8Array(width * height);
+
+        for (let y = 1; y < height; y++) {
+            for (let x = 1; x < width; x++) {
+                const index = y * width + x;
+                const pixel = index * 4;
+
+                if (
+                    rebuildPixelDifference(small.data, pixel, pixel - 4) >=
+                    sensitivity
+                ) {
+                    verticalEdges[index] = 1;
+                }
+
+                if (
+                    rebuildPixelDifference(
+                        small.data,
+                        pixel,
+                        pixel - width * 4
+                    ) >= sensitivity
+                ) {
+                    horizontalEdges[index] = 1;
+                }
+            }
+        }
+
+        const minSide = Math.max(
+            5,
+            Math.round(Math.min(width, height) * minPercent / 100)
+        );
+        const horizontalLines = rebuildLineRuns(
+            horizontalEdges,
+            width,
+            height,
+            true,
+            minSide
+        );
+        const candidates = rebuildColorRegions(
+            small,
+            sensitivity,
+            minSide
+        );
+
+        const sortedLines = [...horizontalLines].sort((a, b) => a.p - b.p);
+
+        for (let i = 0; i < sortedLines.length; i++) {
+            const topLine = sortedLines[i];
+
+            for (let j = i + 1; j < sortedLines.length; j++) {
+                const bottomLine = sortedLines[j];
+                const boxHeight = bottomLine.p - topLine.p;
+
+                if (boxHeight < minSide) continue;
+                if (boxHeight > height * 0.8) break;
+
+                const overlap = Math.max(
+                    0,
+                    Math.min(topLine.b, bottomLine.b) -
+                        Math.max(topLine.a, bottomLine.a)
+                );
+                const shorter = Math.min(topLine.length, bottomLine.length);
+
+                if (overlap / Math.max(1, shorter) < 0.78) continue;
+                if (
+                    Math.abs(topLine.a - bottomLine.a) > Math.max(4, shorter * 0.12) ||
+                    Math.abs(topLine.b - bottomLine.b) > Math.max(4, shorter * 0.12)
+                ) {
+                    continue;
+                }
+
+                const left = Math.round((topLine.a + bottomLine.a) / 2);
+                const right = Math.round((topLine.b + bottomLine.b) / 2);
+                const leftSupport = rebuildSideSupport(
+                    verticalEdges,
+                    width,
+                    height,
+                    left,
+                    topLine.p,
+                    bottomLine.p
+                );
+                const rightSupport = rebuildSideSupport(
+                    verticalEdges,
+                    width,
+                    height,
+                    right - 1,
+                    topLine.p,
+                    bottomLine.p
+                );
+
+                if (Math.min(leftSupport, rightSupport) < 0.16) continue;
+
+                candidates.push({
+                    l: left,
+                    t: topLine.p,
+                    r: right,
+                    b: bottomLine.p + 1,
+                    score: Math.min(
+                        0.99,
+                        0.58 + (leftSupport + rightSupport) * 0.18
+                    ),
+                    detector: "edge",
+                });
+
+                // The closest matching lower edge is normally the useful one.
+                break;
+            }
+        }
+
+        const sourceScaleX = source.width / width;
+        const sourceScaleY = source.height / height;
+        const normalized = candidates
+            .map((candidate) => ({
+                ...candidate,
+                l: Math.max(0, Math.round(candidate.l * sourceScaleX)),
+                t: Math.max(0, Math.round(candidate.t * sourceScaleY)),
+                r: Math.min(source.width, Math.round(candidate.r * sourceScaleX)),
+                b: Math.min(source.height, Math.round(candidate.b * sourceScaleY)),
+            }))
+            .filter((candidate) => {
+                const widthPx = candidate.r - candidate.l;
+                const heightPx = candidate.b - candidate.t;
+                const areaRatio = rebuildArea(candidate) /
+                    Math.max(1, source.width * source.height);
+                return widthPx >= 8 && heightPx >= 8 && areaRatio < 0.88;
+            })
+            .sort((a, b) => b.score - a.score || rebuildArea(b) - rebuildArea(a));
+
+        const kept = [];
+
+        for (const candidate of normalized) {
+            const duplicate = kept.some((other) => {
+                const edgeDistance =
+                    Math.abs(other.l - candidate.l) +
+                    Math.abs(other.t - candidate.t) +
+                    Math.abs(other.r - candidate.r) +
+                    Math.abs(other.b - candidate.b);
+                const perimeter =
+                    (candidate.r - candidate.l) +
+                    (candidate.b - candidate.t);
+
+                return (
+                    rebuildIou(other, candidate) > 0.78 ||
+                    edgeDistance / Math.max(1, perimeter) < 0.06
+                );
+            });
+
+            if (!duplicate) kept.push(candidate);
+            if (kept.length >= 42) break;
+        }
+
+        for (const candidate of kept) {
+            const widthPx = candidate.r - candidate.l;
+            const heightPx = candidate.b - candidate.t;
+            const aspect = widthPx / Math.max(1, heightPx);
+            const areaRatio = rebuildArea(candidate) /
+                Math.max(1, source.width * source.height);
+
+            const repeated = kept.filter((other) => {
+                if (other === candidate) return false;
+                const otherWidth = other.r - other.l;
+                const otherHeight = other.b - other.t;
+                return (
+                    Math.abs(otherWidth - widthPx) / Math.max(widthPx, otherWidth) < 0.16 &&
+                    Math.abs(otherHeight - heightPx) / Math.max(heightPx, otherHeight) < 0.16
+                );
+            }).length >= 1;
+
+            candidate.type =
+                areaRatio >= 0.17
+                    ? "panel"
+                    : aspect >= 3.2 && candidate.t < source.height * 0.42
+                    ? "header"
+                    : repeated && areaRatio <= 0.12
+                    ? "button"
+                    : "image";
+            candidate.id = newId();
+            candidate.manual = false;
+        }
+
+        return kept.sort((a, b) => rebuildArea(b) - rebuildArea(a));
+    }
+
+    function rebuildRingColor(source, rect) {
+        const { width, height, data } = source;
+        const margin = Math.max(2, Math.round(Math.min(width, height) * 0.004));
+        const samples = [];
+        const step = Math.max(1, Math.floor((rect.r - rect.l + rect.b - rect.t) / 180));
+
+        const add = (x, y) => {
+            x = Math.max(0, Math.min(width - 1, Math.round(x)));
+            y = Math.max(0, Math.min(height - 1, Math.round(y)));
+            const offset = (y * width + x) * 4;
+            if (data[offset + 3] < 10) return;
+            samples.push([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
+        };
+
+        for (let x = rect.l; x < rect.r; x += step) {
+            add(x, rect.t - margin);
+            add(x, rect.b + margin);
+        }
+
+        for (let y = rect.t; y < rect.b; y += step) {
+            add(rect.l - margin, y);
+            add(rect.r + margin, y);
+        }
+
+        if (!samples.length) {
+            add(rect.l, rect.t);
+            add(rect.r - 1, rect.b - 1);
+        }
+
+        samples.sort((a, b) =>
+            (a[0] + a[1] + a[2]) - (b[0] + b[1] + b[2])
+        );
+
+        const middle = samples[Math.floor(samples.length / 2)] || [0, 0, 0, 255];
+        return middle;
+    }
+
+    function cleanedScreenshotCrop(source, rect, childRegions = []) {
+        const crop = cropImageData(
+            source,
+            rect.l,
+            rect.t,
+            rect.r,
+            rect.b
+        );
+        const data = new Uint8ClampedArray(crop.data);
+
+        for (const child of childRegions) {
+            const color = rebuildRingColor(source, child);
+            const left = Math.max(0, Math.floor(child.l - rect.l - 1));
+            const top = Math.max(0, Math.floor(child.t - rect.t - 1));
+            const right = Math.min(crop.width, Math.ceil(child.r - rect.l + 1));
+            const bottom = Math.min(crop.height, Math.ceil(child.b - rect.t + 1));
+
+            for (let y = top; y < bottom; y++) {
+                for (let x = left; x < right; x++) {
+                    const offset = (y * crop.width + x) * 4;
+                    data[offset] = color[0];
+                    data[offset + 1] = color[1];
+                    data[offset + 2] = color[2];
+                    data[offset + 3] = color[3];
+                }
+            }
+        }
+
+        return new ImageData(data, crop.width, crop.height, {
+            colorSpace: crop.colorSpace || "srgb",
+        });
+    }
+
+    function persistRebuildTexture(path, imageData, sourceName) {
+        try {
+            localStorage.setItem(
+                `asset_${path}_png`,
+                JSON.stringify({
+                    base64: imageDataToDataUrl(imageData),
+                    metadata: {
+                        name: `${path.split("/").pop()}.png`,
+                        relativePath: `textures/${path}.png`,
+                        rebuiltFromScreenshot: sourceName,
+                    },
+                })
+            );
+            return true;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function registerRebuildTexture(imageData, sourceName, role, mods) {
+        const stem = cleanImageName(sourceName || "screenshot");
+        let path = `rebuild/${stem}_${role}`;
+        let suffix = 2;
+
+        while (mods.index.images.has(path)) {
+            path = `rebuild/${stem}_${role}_${suffix++}`;
+        }
+
+        mods.index.images.set(path, {
+            png: imageData,
+            __ragScreenshotGenerated: true,
+        });
+        rebuildGeneratedAssets.set(path, imageData);
+
+        const persisted = persistRebuildTexture(path, imageData, sourceName);
+        return { path, persisted };
+    }
+
+    function rebuildCrc32(bytes) {
+        if (!rebuildCrcTable) {
+            rebuildCrcTable = new Uint32Array(256);
+
+            for (let index = 0; index < 256; index++) {
+                let value = index;
+
+                for (let bit = 0; bit < 8; bit++) {
+                    value =
+                        value & 1
+                            ? 0xedb88320 ^ (value >>> 1)
+                            : value >>> 1;
+                }
+
+                rebuildCrcTable[index] = value >>> 0;
+            }
+        }
+
+        let crc = 0xffffffff;
+
+        for (const byte of bytes) {
+            crc = rebuildCrcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+        }
+
+        return (crc ^ 0xffffffff) >>> 0;
+    }
+
+    function rebuildZipHeader(size) {
+        return new Uint8Array(size);
+    }
+
+    function rebuildZipWrite(view, offset, value, bytes) {
+        if (bytes === 2) view.setUint16(offset, value, true);
+        else view.setUint32(offset, value >>> 0, true);
+    }
+
+    function rebuildDosDate(date = new Date()) {
+        const year = Math.max(1980, date.getFullYear());
+        return {
+            time:
+                (date.getHours() << 11) |
+                (date.getMinutes() << 5) |
+                Math.floor(date.getSeconds() / 2),
+            date:
+                ((year - 1980) << 9) |
+                ((date.getMonth() + 1) << 5) |
+                date.getDate(),
+        };
+    }
+
+    function rebuildImageDataPngBytes(imageData) {
+        return new Promise((resolve, reject) => {
+            const canvas = document.createElement("canvas");
+            canvas.width = imageData.width;
+            canvas.height = imageData.height;
+            canvas.getContext("2d").putImageData(imageData, 0, 0);
+            canvas.toBlob(
+                async (blob) => {
+                    if (!blob) {
+                        reject(new Error("Falha ao gerar PNG."));
+                        return;
+                    }
+
+                    resolve(new Uint8Array(await blob.arrayBuffer()));
+                },
+                "image/png"
+            );
+        });
+    }
+
+    async function rebuildAssetsZip(paths) {
+        const encoder = new TextEncoder();
+        const files = [];
+
+        for (const path of [...new Set(paths)]) {
+            const imageData = rebuildGeneratedAssets.get(path);
+            if (!imageData) continue;
+
+            files.push({
+                name: encoder.encode(`textures/${path}.png`),
+                bytes: await rebuildImageDataPngBytes(imageData),
+            });
+        }
+
+        if (!files.length) {
+            throw new Error("Nenhuma textura reconstruida esta disponivel.");
+        }
+
+        const parts = [];
+        const centralParts = [];
+        const timestamp = rebuildDosDate();
+        let offset = 0;
+
+        for (const file of files) {
+            const crc = rebuildCrc32(file.bytes);
+            const local = rebuildZipHeader(30);
+            const localView = new DataView(local.buffer);
+            rebuildZipWrite(localView, 0, 0x04034b50, 4);
+            rebuildZipWrite(localView, 4, 20, 2);
+            rebuildZipWrite(localView, 6, 0, 2);
+            rebuildZipWrite(localView, 8, 0, 2);
+            rebuildZipWrite(localView, 10, timestamp.time, 2);
+            rebuildZipWrite(localView, 12, timestamp.date, 2);
+            rebuildZipWrite(localView, 14, crc, 4);
+            rebuildZipWrite(localView, 18, file.bytes.length, 4);
+            rebuildZipWrite(localView, 22, file.bytes.length, 4);
+            rebuildZipWrite(localView, 26, file.name.length, 2);
+            rebuildZipWrite(localView, 28, 0, 2);
+            parts.push(local, file.name, file.bytes);
+
+            const central = rebuildZipHeader(46);
+            const centralView = new DataView(central.buffer);
+            rebuildZipWrite(centralView, 0, 0x02014b50, 4);
+            rebuildZipWrite(centralView, 4, 20, 2);
+            rebuildZipWrite(centralView, 6, 20, 2);
+            rebuildZipWrite(centralView, 8, 0, 2);
+            rebuildZipWrite(centralView, 10, 0, 2);
+            rebuildZipWrite(centralView, 12, timestamp.time, 2);
+            rebuildZipWrite(centralView, 14, timestamp.date, 2);
+            rebuildZipWrite(centralView, 16, crc, 4);
+            rebuildZipWrite(centralView, 20, file.bytes.length, 4);
+            rebuildZipWrite(centralView, 24, file.bytes.length, 4);
+            rebuildZipWrite(centralView, 28, file.name.length, 2);
+            rebuildZipWrite(centralView, 30, 0, 2);
+            rebuildZipWrite(centralView, 32, 0, 2);
+            rebuildZipWrite(centralView, 34, 0, 2);
+            rebuildZipWrite(centralView, 36, 0, 2);
+            rebuildZipWrite(centralView, 38, 0, 4);
+            rebuildZipWrite(centralView, 42, offset, 4);
+            centralParts.push(central, file.name);
+
+            offset += local.length + file.name.length + file.bytes.length;
+        }
+
+        const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+        const end = rebuildZipHeader(22);
+        const endView = new DataView(end.buffer);
+        rebuildZipWrite(endView, 0, 0x06054b50, 4);
+        rebuildZipWrite(endView, 4, 0, 2);
+        rebuildZipWrite(endView, 6, 0, 2);
+        rebuildZipWrite(endView, 8, files.length, 2);
+        rebuildZipWrite(endView, 10, files.length, 2);
+        rebuildZipWrite(endView, 12, centralSize, 4);
+        rebuildZipWrite(endView, 16, offset, 4);
+        rebuildZipWrite(endView, 20, 0, 2);
+
+        return new Blob([...parts, ...centralParts, end], {
+            type: "application/zip",
+        });
+    }
+
+    async function downloadRebuildAssets(paths, sourceName) {
+        const zip = await rebuildAssetsZip(paths);
+        const url = URL.createObjectURL(zip);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${cleanImageName(sourceName)}_ui_textures.zip`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    function createRebuildCanvas(
+        parent,
+        imageData,
+        sourceName,
+        role,
+        box,
+        mods,
+        locked = false
+    ) {
+        const registered = registerRebuildTexture(
+            imageData,
+            sourceName,
+            role,
+            mods
+        );
+        const id = newId();
+        const image = new mods.DraggableCanvas(
+            id,
+            parent,
+            imageData,
+            registered.path
+        );
+
+        mods.index.GLOBAL_ELEMENT_MAP.set(id, image);
+        image.drawImage(Math.max(1, box.width), Math.max(1, box.height), false);
+        image.canvasHolder.style.left = `${box.left}px`;
+        image.canvasHolder.style.top = `${box.top}px`;
+        image.canvasHolder.style.zIndex = String(box.layer ?? 30);
+        image.canvasHolder.dataset.ragKeepAspect = "false";
+        image.canvasHolder.dataset.ragScreenshotRole = role;
+        image.canvasHolder.dataset.ragExplorerName =
+            role === "background" ? "FUNDO RECONSTRUIDO" : "IMAGEM RECONSTRUIDA";
+
+        if (locked) {
+            image.canvasHolder.dataset.ragFixedDecorative = "true";
+            image.canvasHolder.dataset.ragBorderSystemRole = "background";
+            image.canvasHolder.style.pointerEvents = "none";
+            image.gridElement.style.pointerEvents = "none";
+            image.resizeHandle.style.display = "none";
+            image.editable?.(false);
+        }
+
+        return {
+            image,
+            path: registered.path,
+            persisted: registered.persisted,
+        };
+    }
+
+    function observeRebuildPanelBackground(panel, image) {
+        rebuildPanelBackgrounds.set(panel, image);
+
+        if (!rebuildPanelResizeObserver && window.ResizeObserver) {
+            rebuildPanelResizeObserver = new ResizeObserver((entries) => {
+                for (const entry of entries) {
+                    const background = rebuildPanelBackgrounds.get(entry.target);
+                    if (!background) continue;
+
+                    const width = entry.contentRect.width;
+                    const height = entry.contentRect.height;
+                    background.canvasHolder.style.left = "0px";
+                    background.canvasHolder.style.top = "0px";
+                    background.drawImage(
+                        Math.max(1, width),
+                        Math.max(1, height),
+                        false
+                    );
+                }
+            });
+        }
+
+        rebuildPanelResizeObserver?.observe(panel);
+    }
+
+    function directRebuildChildren(region, regions) {
+        const contained = regions.filter(
+            (candidate) =>
+                candidate !== region &&
+                rebuildContains(region, candidate) &&
+                rebuildArea(candidate) < rebuildArea(region) * 0.94
+        );
+
+        return contained.filter(
+            (candidate) =>
+                !contained.some(
+                    (possibleParent) =>
+                        possibleParent !== candidate &&
+                        ["panel", "header"].includes(possibleParent.type) &&
+                        rebuildContains(possibleParent, candidate) &&
+                        rebuildArea(possibleParent) < rebuildArea(region) * 0.94 &&
+                        rebuildArea(possibleParent) > rebuildArea(candidate) * 1.06
+                )
+        );
+    }
+
+    function rebuildParentRegion(region, regions) {
+        return regions
+            .filter(
+                (candidate) =>
+                    candidate !== region &&
+                    ["panel", "header"].includes(candidate.type) &&
+                    rebuildContains(candidate, region) &&
+                    rebuildArea(candidate) > rebuildArea(region) * 1.06
+            )
+            .sort((a, b) => rebuildArea(a) - rebuildArea(b))[0] || null;
+    }
+
+    function installScreenshotReference(root, dataUrl, name, assetPaths) {
+        const oldReference = root.querySelector(":scope > .rag-ui-reference");
+        oldReference?.remove();
+
+        let reference = null;
+
+        if (dataUrl) {
+            reference = document.createElement("img");
+            reference.className = "rag-ui-reference";
+            reference.dataset.shouldParse = "false";
+            reference.dataset.ragEditorOnly = "true";
+            reference.alt = "Referencia da UI";
+            reference.src = dataUrl;
+            reference.style.opacity = "0.22";
+            root.appendChild(reference);
+        }
+
+        document.querySelector(".rag-reference-toolbar")?.remove();
+
+        const toolbar = document.createElement("div");
+        toolbar.className = "rag-reference-toolbar";
+        toolbar.dataset.target = root.dataset.id || "";
+
+        const title = document.createElement("strong");
+        title.textContent = reference
+            ? `REFERENCIA: ${name}`
+            : `UI RECONSTRUIDA: ${name}`;
+
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.textContent = "OCULTAR";
+
+        const opacity = document.createElement("input");
+        opacity.type = "range";
+        opacity.min = "0";
+        opacity.max = "100";
+        opacity.value = "22";
+        opacity.title = "Opacidade da referencia";
+
+        const close = document.createElement("button");
+        close.type = "button";
+        close.textContent = "FECHAR";
+
+        const download = document.createElement("button");
+        download.type = "button";
+        download.className = "rag-download-assets";
+        download.textContent = "BAIXAR ASSETS ZIP";
+
+        let visible = true;
+
+        toggle.addEventListener("click", () => {
+            if (!reference) return;
+            visible = !visible;
+            reference.style.display = visible ? "block" : "none";
+            toggle.textContent = visible ? "OCULTAR" : "MOSTRAR";
+        });
+
+        opacity.addEventListener("input", () => {
+            if (!reference) return;
+            reference.style.opacity = String(Number(opacity.value) / 100);
+            if (!visible) {
+                visible = true;
+                reference.style.display = "block";
+                toggle.textContent = "OCULTAR";
+            }
+        });
+
+        download.addEventListener("click", async () => {
+            download.disabled = true;
+            download.textContent = "GERANDO ZIP...";
+
+            try {
+                await downloadRebuildAssets(assetPaths, name);
+                download.textContent = "ZIP BAIXADO";
+            } catch (error) {
+                console.error(error);
+                download.textContent = "FALHA NO ZIP";
+                showBanner(
+                    `Falha ao baixar assets: ${error?.message || error}`,
+                    "error"
+                );
+            } finally {
+                setTimeout(() => {
+                    download.disabled = false;
+                    download.textContent = "BAIXAR ASSETS ZIP";
+                }, 1400);
+            }
+        });
+
+        close.addEventListener("click", () => toolbar.remove());
+        toolbar.append(title);
+
+        if (reference) toolbar.append(toggle, opacity);
+
+        toolbar.append(download, close);
+        document.body.appendChild(toolbar);
+    }
+
+    async function buildUiFromScreenshot(
+        source,
+        sourceDataUrl,
+        sourceName,
+        regions,
+        includeReference,
+        mods
+    ) {
+        const rootSelection = regions.find((region) => region.type === "root");
+
+        if (rootSelection) {
+            const rootBounds = {
+                l: Math.max(0, Math.floor(rootSelection.l)),
+                t: Math.max(0, Math.floor(rootSelection.t)),
+                r: Math.min(source.width, Math.ceil(rootSelection.r)),
+                b: Math.min(source.height, Math.ceil(rootSelection.b)),
+            };
+            const croppedSource = cropImageData(
+                source,
+                rootBounds.l,
+                rootBounds.t,
+                rootBounds.r,
+                rootBounds.b
+            );
+
+            regions = regions
+                .filter(
+                    (region) =>
+                        region !== rootSelection &&
+                        rebuildIntersection(region, rootBounds) /
+                            Math.max(1, rebuildArea(region)) >= 0.55
+                )
+                .map((region) => ({
+                    ...region,
+                    l: clampNumber(region.l - rootBounds.l, 0, croppedSource.width),
+                    t: clampNumber(region.t - rootBounds.t, 0, croppedSource.height),
+                    r: clampNumber(region.r - rootBounds.l, 0, croppedSource.width),
+                    b: clampNumber(region.b - rootBounds.t, 0, croppedSource.height),
+                }))
+                .filter(
+                    (region) =>
+                        region.r - region.l >= 2 &&
+                        region.b - region.t >= 2
+                );
+
+            source = croppedSource;
+            sourceDataUrl = imageDataToDataUrl(croppedSource);
+        }
+
+        const active = regions
+            .filter(
+                (region) =>
+                    region.type !== "ignore" &&
+                    region.type !== "root"
+            )
+            .sort((a, b) => rebuildArea(b) - rebuildArea(a));
+        const destination = nearestValidContainer(mods) || mods.config.rootElement;
+
+        if (!(destination instanceof HTMLElement)) {
+            throw new Error("Crie ou abra um formulario antes de reconstruir a UI.");
+        }
+
+        const parentRect = destination.getBoundingClientRect();
+        const scale = Math.min(
+            (parentRect.width * 0.9) / Math.max(1, source.width),
+            (parentRect.height * 0.9) / Math.max(1, source.height),
+            1
+        );
+        const rootWidth = Math.max(40, source.width * scale);
+        const rootHeight = Math.max(40, source.height * scale);
+        const rootId = newId();
+        const rootPanel = new mods.DraggablePanel(rootId, destination);
+        mods.index.GLOBAL_ELEMENT_MAP.set(rootId, rootPanel);
+
+        const root = rootPanel.panel;
+        root.style.width = `${rootWidth}px`;
+        root.style.height = `${rootHeight}px`;
+        root.style.left = `${Math.max(0, (parentRect.width - rootWidth) / 2)}px`;
+        root.style.top = `${Math.max(0, (parentRect.height - rootHeight) / 2)}px`;
+        root.style.zIndex = "40";
+        root.style.overflow = "hidden";
+        root.dataset.ragClipsChildren = "true";
+        root.dataset.ragScreenshotRoot = "true";
+        root.dataset.ragExplorerName = "UI RECONSTRUIDA";
+
+        const regionInstances = new Map();
+        const generatedPaths = [];
+        let persistenceFailed = false;
+
+        const topLevel = active.filter(
+            (region) => !rebuildParentRegion(region, active)
+        );
+        const rootBackground = cleanedScreenshotCrop(
+            source,
+            { l: 0, t: 0, r: source.width, b: source.height },
+            topLevel
+        );
+        const rootBackgroundResult = createRebuildCanvas(
+            root,
+            rootBackground,
+            sourceName,
+            "background",
+            {
+                left: 0,
+                top: 0,
+                width: rootWidth,
+                height: rootHeight,
+                layer: 1,
+            },
+            mods,
+            true
+        );
+        generatedPaths.push(rootBackgroundResult.path);
+        observeRebuildPanelBackground(root, rootBackgroundResult.image);
+        persistenceFailed ||= !rootBackgroundResult.persisted;
+
+        for (const region of active) {
+            const parentRegion = rebuildParentRegion(region, active);
+            const parentEntry = parentRegion
+                ? regionInstances.get(parentRegion.id)
+                : null;
+            const parent = parentEntry?.element || root;
+            const originLeft = parentRegion?.l || 0;
+            const originTop = parentRegion?.t || 0;
+            const box = {
+                left: (region.l - originLeft) * scale,
+                top: (region.t - originTop) * scale,
+                width: (region.r - region.l) * scale,
+                height: (region.b - region.t) * scale,
+            };
+
+            if (region.type === "panel" || region.type === "header") {
+                const id = newId();
+                const panel = new mods.DraggablePanel(id, parent);
+                mods.index.GLOBAL_ELEMENT_MAP.set(id, panel);
+                panel.panel.style.left = `${box.left}px`;
+                panel.panel.style.top = `${box.top}px`;
+                panel.panel.style.width = `${Math.max(2, box.width)}px`;
+                panel.panel.style.height = `${Math.max(2, box.height)}px`;
+                panel.panel.style.zIndex = region.type === "header" ? "45" : "30";
+                panel.panel.style.overflow = "hidden";
+                panel.panel.dataset.ragClipsChildren = "true";
+                panel.panel.dataset.ragScreenshotRole = region.type;
+                panel.panel.dataset.ragExplorerName =
+                    region.type === "header" ? "HEADER DETECTADO" : "PAINEL DETECTADO";
+
+                if (region.type === "header") {
+                    panel.panel.dataset.ragHeader = "true";
+                }
+
+                regionInstances.set(region.id, {
+                    instance: panel,
+                    element: panel.panel,
+                });
+
+                const children = directRebuildChildren(region, active);
+                const background = cleanedScreenshotCrop(source, region, children);
+                const backgroundResult = createRebuildCanvas(
+                    panel.panel,
+                    background,
+                    sourceName,
+                    `${region.type}_background`,
+                    {
+                        left: 0,
+                        top: 0,
+                        width: box.width,
+                        height: box.height,
+                        layer: 1,
+                    },
+                    mods,
+                    true
+                );
+                generatedPaths.push(backgroundResult.path);
+                observeRebuildPanelBackground(panel.panel, backgroundResult.image);
+                persistenceFailed ||= !backgroundResult.persisted;
+                continue;
+            }
+
+            const crop = cropImageData(
+                source,
+                region.l,
+                region.t,
+                region.r,
+                region.b
+            );
+
+            if (region.type === "button") {
+                const registered = registerRebuildTexture(
+                    crop,
+                    sourceName,
+                    "button",
+                    mods
+                );
+                generatedPaths.push(registered.path);
+                persistenceFailed ||= !registered.persisted;
+                const id = newId();
+                const button = new mods.DraggableButton(id, parent, {
+                    buttonText: "",
+                    defaultTexture: registered.path,
+                    hoverTexture: registered.path,
+                    pressedTexture: registered.path,
+                });
+                mods.index.GLOBAL_ELEMENT_MAP.set(id, button);
+                const state = mods.index.images.get(registered.path);
+                button.drawImage(box.width, box.height, state, false);
+                button.button.style.left = `${box.left}px`;
+                button.button.style.top = `${box.top}px`;
+                button.button.style.zIndex = "50";
+                button.button.dataset.ragCompoundButton = "true";
+                button.button.dataset.ragScreenshotRole = "button";
+                button.button.dataset.ragExplorerName = "BOTAO DETECTADO";
+
+                if (button.displayText) {
+                    button.displayText.label.value = "";
+                    button.displayText.updateSize(false);
+                }
+
+                regionInstances.set(region.id, {
+                    instance: button,
+                    element: button.button,
+                });
+                continue;
+            }
+
+            if (region.type === "label") {
+                const id = newId();
+                const label = new mods.DraggableLabel(id, parent, {
+                    text: "Texto",
+                    includeTextPrompt: true,
+                    fontScale: Math.max(0.55, Math.min(3, box.height / 28)),
+                });
+                mods.index.GLOBAL_ELEMENT_MAP.set(id, label);
+                label.label.style.left = `${box.left}px`;
+                label.label.style.top = `${box.top}px`;
+                label.label.dataset.ragScreenshotRole = "label";
+                label.label.dataset.ragExplorerName = "TEXTO DETECTADO";
+                label.updateSize(false);
+                regionInstances.set(region.id, {
+                    instance: label,
+                    element: label.label,
+                });
+                continue;
+            }
+
+            const imageResult = createRebuildCanvas(
+                parent,
+                crop,
+                sourceName,
+                "image",
+                {
+                    ...box,
+                    layer: 40,
+                },
+                mods,
+                false
+            );
+            generatedPaths.push(imageResult.path);
+            persistenceFailed ||= !imageResult.persisted;
+            regionInstances.set(region.id, {
+                instance: imageResult.image,
+                element: imageResult.image.canvasHolder,
+            });
+        }
+
+        installScreenshotReference(
+            root,
+            includeReference ? sourceDataUrl : "",
+            sourceName,
+            generatedPaths
+        );
+
+        mods.index.Builder.updateExplorer();
+        rootPanel.select(
+            new MouseEvent("dblclick", {
+                bubbles: true,
+                cancelable: true,
+            })
+        );
+
+        return {
+            count: active.length,
+            textureCount: generatedPaths.length,
+            persistenceFailed,
+        };
+    }
+
+    function openScreenshotRebuilder(file, mods) {
+        document.getElementById("ragScreenshotRebuilder")?.remove();
+
+        Promise.all([fileImageData(file), fileDataUrl(file)])
+            .then(([source, sourceDataUrl]) => {
+                const overlay = document.createElement("div");
+                overlay.id = "ragScreenshotRebuilder";
+                overlay.className = "rag-rebuild-overlay";
+
+                const card = document.createElement("div");
+                card.className = "rag-rebuild-card";
+
+                const title = document.createElement("div");
+                title.className = "rag-rebuild-title";
+                title.textContent = "IMAGEM -> UI EDITAVEL";
+
+                const hint = document.createElement("div");
+                hint.className = "rag-rebuild-hint";
+                hint.textContent =
+                    "A analise roda somente neste navegador. Se a captura tiver barra do Chrome, desenhe uma regiao ao redor da interface e escolha AREA DA UI. Arraste regioes ou seus cantos para ajustar.";
+
+                const analysisControls = document.createElement("div");
+                analysisControls.className = "rag-rebuild-analysis";
+
+                const sensitivityLabel = document.createElement("label");
+                sensitivityLabel.textContent = "Sensibilidade";
+                const sensitivity = document.createElement("input");
+                sensitivity.type = "range";
+                sensitivity.min = "12";
+                sensitivity.max = "64";
+                sensitivity.value = "30";
+                sensitivityLabel.appendChild(sensitivity);
+
+                const minimumLabel = document.createElement("label");
+                minimumLabel.textContent = "Tamanho minimo";
+                const minimum = document.createElement("input");
+                minimum.type = "range";
+                minimum.min = "1";
+                minimum.max = "10";
+                minimum.value = "3";
+                minimumLabel.appendChild(minimum);
+
+                const analyze = document.createElement("button");
+                analyze.type = "button";
+                analyze.textContent = "ANALISAR NOVAMENTE";
+                analysisControls.append(sensitivityLabel, minimumLabel, analyze);
+
+                const stage = document.createElement("div");
+                stage.className = "rag-rebuild-stage";
+                stage.style.aspectRatio = `${source.width} / ${source.height}`;
+
+                const canvas = document.createElement("canvas");
+                canvas.className = "rag-rebuild-source";
+                canvas.width = source.width;
+                canvas.height = source.height;
+                canvas.getContext("2d").putImageData(source, 0, 0);
+
+                const regionLayer = document.createElement("div");
+                regionLayer.className = "rag-rebuild-region-layer";
+                stage.append(canvas, regionLayer);
+
+                const status = document.createElement("div");
+                status.className = "rag-rebuild-status";
+
+                const selectionTools = document.createElement("div");
+                selectionTools.className = "rag-rebuild-selection-tools";
+
+                const roleLabel = document.createElement("label");
+                roleLabel.textContent = "TIPO DA REGIAO";
+                const role = document.createElement("select");
+
+                for (const [value, label] of rebuildRoleLabels) {
+                    const option = document.createElement("option");
+                    option.value = value;
+                    option.textContent = label;
+                    role.appendChild(option);
+                }
+
+                roleLabel.appendChild(role);
+
+                const remove = document.createElement("button");
+                remove.type = "button";
+                remove.textContent = "EXCLUIR REGIAO";
+                selectionTools.append(roleLabel, remove);
+
+                const referenceLabel = document.createElement("label");
+                referenceLabel.className = "rag-rebuild-reference-option";
+                const reference = document.createElement("input");
+                reference.type = "checkbox";
+                reference.checked = true;
+                referenceLabel.append(
+                    reference,
+                    document.createTextNode(
+                        " Manter imagem como referencia transparente (nao exporta)"
+                    )
+                );
+
+                const actions = document.createElement("div");
+                actions.className = "rag-rebuild-actions";
+                const cancel = document.createElement("button");
+                cancel.type = "button";
+                cancel.textContent = "CANCELAR";
+                const clear = document.createElement("button");
+                clear.type = "button";
+                clear.textContent = "LIMPAR REGIOES";
+                const create = document.createElement("button");
+                create.type = "button";
+                create.className = "primary";
+                create.textContent = "CRIAR UI EDITAVEL";
+                actions.append(cancel, clear, create);
+
+                card.append(
+                    title,
+                    hint,
+                    analysisControls,
+                    stage,
+                    status,
+                    selectionTools,
+                    referenceLabel,
+                    actions
+                );
+                overlay.appendChild(card);
+                document.body.appendChild(overlay);
+
+                let regions = [];
+                let selectedId = "";
+                let operation = null;
+
+                const sourcePoint = (event) => {
+                    const rect = stage.getBoundingClientRect();
+                    return {
+                        x: clampNumber(
+                            (event.clientX - rect.left) * source.width /
+                                Math.max(1, rect.width),
+                            0,
+                            source.width
+                        ),
+                        y: clampNumber(
+                            (event.clientY - rect.top) * source.height /
+                                Math.max(1, rect.height),
+                            0,
+                            source.height
+                        ),
+                    };
+                };
+
+                const selectedRegion = () =>
+                    regions.find((region) => region.id === selectedId) || null;
+
+                const render = () => {
+                    regionLayer.replaceChildren();
+
+                    regions.forEach((region, index) => {
+                        const element = document.createElement("div");
+                        element.className = "rag-rebuild-region";
+                        element.dataset.id = region.id;
+                        element.dataset.type = region.type;
+                        element.classList.toggle("selected", region.id === selectedId);
+                        element.style.left = `${region.l / source.width * 100}%`;
+                        element.style.top = `${region.t / source.height * 100}%`;
+                        element.style.width = `${(region.r - region.l) / source.width * 100}%`;
+                        element.style.height = `${(region.b - region.t) / source.height * 100}%`;
+
+                        const badge = document.createElement("span");
+                        badge.textContent = `${index + 1} ${rebuildRoleLabels.get(region.type)}`;
+                        element.appendChild(badge);
+                        makeRectHandles(element);
+                        regionLayer.appendChild(element);
+                    });
+
+                    const selected = selectedRegion();
+                    role.disabled = !selected;
+                    remove.disabled = !selected;
+
+                    if (selected) role.value = selected.type;
+
+                    const automaticCount = regions.filter((item) => !item.manual).length;
+                    const manualCount = regions.length - automaticCount;
+                    status.textContent =
+                        `${regions.length} regioes • ${automaticCount} detectadas • ` +
+                        `${manualCount} manuais` +
+                        (selected
+                            ? ` • selecionada: ${Math.round(selected.r - selected.l)} x ${Math.round(selected.b - selected.t)} px`
+                            : " • toque numa regiao para classificar");
+                };
+
+                const runAnalysis = async () => {
+                    analyze.disabled = true;
+                    analyze.textContent = "ANALISANDO...";
+                    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+                    const manual = regions.filter((region) => region.manual);
+                    const detected = analyzeScreenshotRegions(
+                        source,
+                        Number(sensitivity.value),
+                        Number(minimum.value)
+                    );
+                    regions = [...manual, ...detected];
+                    selectedId = regions[0]?.id || "";
+                    render();
+                    analyze.disabled = false;
+                    analyze.textContent = "ANALISAR NOVAMENTE";
+                };
+
+                stage.addEventListener("pointerdown", (event) => {
+                    if (!(event.target instanceof Element)) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+
+                    const point = sourcePoint(event);
+                    const regionElement = event.target.closest(".rag-rebuild-region");
+                    const handle = event.target.closest(".rag-crop-handle");
+
+                    if (regionElement) {
+                        selectedId = regionElement.dataset.id || "";
+                        const selected = selectedRegion();
+                        if (!selected) return;
+
+                        operation = {
+                            kind: handle ? "resize" : "move",
+                            corner: handle?.dataset.corner || "",
+                            start: point,
+                            original: { ...selected },
+                        };
+                    } else {
+                        const region = {
+                            id: newId(),
+                            l: point.x,
+                            t: point.y,
+                            r: point.x,
+                            b: point.y,
+                            type: "image",
+                            manual: true,
+                            score: 1,
+                            detector: "manual",
+                        };
+                        regions.push(region);
+                        selectedId = region.id;
+                        operation = {
+                            kind: "create",
+                            start: point,
+                            original: { ...region },
+                        };
+                    }
+
+                    stage.setPointerCapture?.(event.pointerId);
+                    render();
+                });
+
+                stage.addEventListener("pointermove", (event) => {
+                    if (!operation) return;
+                    event.preventDefault();
+                    const selected = selectedRegion();
+                    if (!selected) return;
+                    const point = sourcePoint(event);
+                    const dx = point.x - operation.start.x;
+                    const dy = point.y - operation.start.y;
+                    const original = operation.original;
+
+                    if (operation.kind === "create") {
+                        selected.l = Math.min(operation.start.x, point.x);
+                        selected.t = Math.min(operation.start.y, point.y);
+                        selected.r = Math.max(operation.start.x, point.x);
+                        selected.b = Math.max(operation.start.y, point.y);
+                    } else if (operation.kind === "move") {
+                        const width = original.r - original.l;
+                        const height = original.b - original.t;
+                        selected.l = clampNumber(original.l + dx, 0, source.width - width);
+                        selected.t = clampNumber(original.t + dy, 0, source.height - height);
+                        selected.r = selected.l + width;
+                        selected.b = selected.t + height;
+                    } else {
+                        if (operation.corner.includes("l")) {
+                            selected.l = clampNumber(original.l + dx, 0, original.r - 2);
+                        }
+                        if (operation.corner.includes("r")) {
+                            selected.r = clampNumber(original.r + dx, original.l + 2, source.width);
+                        }
+                        if (operation.corner.includes("t")) {
+                            selected.t = clampNumber(original.t + dy, 0, original.b - 2);
+                        }
+                        if (operation.corner.includes("b")) {
+                            selected.b = clampNumber(original.b + dy, original.t + 2, source.height);
+                        }
+                    }
+
+                    render();
+                });
+
+                const finishOperation = (event) => {
+                    if (!operation) return;
+                    const selected = selectedRegion();
+
+                    if (
+                        selected &&
+                        (selected.r - selected.l < 4 || selected.b - selected.t < 4)
+                    ) {
+                        regions = regions.filter((region) => region.id !== selected.id);
+                        selectedId = "";
+                    }
+
+                    operation = null;
+                    try {
+                        stage.releasePointerCapture?.(event.pointerId);
+                    } catch (_) {}
+                    render();
+                };
+
+                stage.addEventListener("pointerup", finishOperation);
+                stage.addEventListener("pointercancel", finishOperation);
+
+                role.addEventListener("change", () => {
+                    const selected = selectedRegion();
+                    if (!selected) return;
+
+                    if (role.value === "root") {
+                        for (const region of regions) {
+                            if (region !== selected && region.type === "root") {
+                                region.type = "image";
+                            }
+                        }
+                    }
+
+                    selected.type = role.value;
+                    selected.manual = true;
+                    render();
+                });
+
+                remove.addEventListener("click", () => {
+                    regions = regions.filter((region) => region.id !== selectedId);
+                    selectedId = regions[0]?.id || "";
+                    render();
+                });
+
+                analyze.addEventListener("click", runAnalysis);
+                clear.addEventListener("click", () => {
+                    regions = [];
+                    selectedId = "";
+                    render();
+                });
+                cancel.addEventListener("click", () => overlay.remove());
+
+                create.addEventListener("click", async () => {
+                    if (!regions.some((region) => region.type !== "ignore")) {
+                        showBanner(
+                            "Adicione ao menos uma regiao antes de criar a UI.",
+                            "error"
+                        );
+                        return;
+                    }
+
+                    create.disabled = true;
+                    create.textContent = "CRIANDO...";
+
+                    try {
+                        const result = await buildUiFromScreenshot(
+                            source,
+                            sourceDataUrl,
+                            file.name,
+                            regions,
+                            reference.checked,
+                            mods
+                        );
+                        overlay.remove();
+                        showBanner(
+                            `${result.count} elementos reconstruidos` +
+                                (result.persistenceFailed
+                                    ? " • limite do armazenamento local atingido"
+                                    : " • texturas salvas localmente"),
+                            result.persistenceFailed ? "error" : "success"
+                        );
+                    } catch (error) {
+                        console.error(error);
+                        showBanner(
+                            `Falha ao reconstruir: ${error?.message || error}`,
+                            "error"
+                        );
+                        create.disabled = false;
+                        create.textContent = "CRIAR UI EDITAVEL";
+                    }
+                });
+
+                void runAnalysis();
+            })
+            .catch((error) => {
+                console.error(error);
+                showBanner(
+                    `Nao foi possivel abrir a imagem: ${error?.message || error}`,
+                    "error"
+                );
+            });
+    }
+
+    function installScreenshotRebuilder(mods) {
+        const importers = document.querySelector(".importers");
+        if (!importers || document.getElementById("ragScreenshotImporter")) return;
+
+        const button = document.createElement("button");
+        button.id = "ragScreenshotImporter";
+        button.type = "button";
+        button.className = "rag-screenshot-importer";
+        button.textContent = "Imagem -> UI";
+        button.title = "Reconstruir uma UI editavel a partir de uma imagem";
+
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "image/png,image/jpeg,image/webp";
+        input.hidden = true;
+
+        button.addEventListener("click", () => {
+            input.value = "";
+            input.click();
+        });
+
+        input.addEventListener("change", () => {
+            const file = input.files?.[0];
+            if (file) openScreenshotRebuilder(file, mods);
+        });
+
+        importers.append(button, input);
+
+        const addElements = document.querySelector(".rag-v23-elements");
+        if (addElements) {
+            const sideButton = button.cloneNode(true);
+            sideButton.removeAttribute("id");
+            sideButton.addEventListener("click", () => {
+                input.value = "";
+                input.click();
+            });
+            addElements.prepend(sideButton);
+        }
+    }
+
+    // ============================================================
     // TEXTURE CROP / EXTRACT EDITOR V17
     // Select any rectangular region from an imported texture and either:
     // - replace the current image pixels while preserving its box, or
@@ -12226,6 +13856,320 @@
     line-height: 1.35;
 }
 
+.rag-screenshot-importer {
+    min-height: 36px;
+    padding: 7px 12px;
+    border: 1px solid #5ba7ff;
+    border-radius: 4px;
+    background: linear-gradient(135deg,#145787,#7139b6);
+    color: white;
+    font-weight: 900;
+    cursor: pointer;
+}
+
+.rag-rebuild-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 500000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    padding: 12px;
+    background: rgba(0,0,0,.86);
+    backdrop-filter: blur(4px);
+}
+
+.rag-rebuild-card {
+    width: min(1040px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    overflow: auto;
+    box-sizing: border-box;
+    padding: 13px;
+    border: 2px solid #5ba7ff;
+    border-radius: 11px;
+    background: #222329;
+    color: white;
+    overscroll-behavior: contain;
+}
+
+.rag-rebuild-title {
+    color: #dcb7ff;
+    text-align: center;
+    font: 900 18px/1.2 sans-serif;
+}
+
+.rag-rebuild-hint {
+    max-width: 780px;
+    margin: 6px auto 10px;
+    color: #c2c2c7;
+    text-align: center;
+    font: 600 10px/1.35 sans-serif;
+}
+
+.rag-rebuild-analysis {
+    display: grid;
+    grid-template-columns: 1fr 1fr minmax(160px,.7fr);
+    gap: 8px;
+    margin-bottom: 9px;
+}
+
+.rag-rebuild-analysis label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    color: #ddd;
+    font: 800 9px/1.2 sans-serif;
+}
+
+.rag-rebuild-analysis input {
+    width: 100%;
+}
+
+.rag-rebuild-analysis button,
+.rag-rebuild-selection-tools button,
+.rag-rebuild-actions button,
+.rag-reference-toolbar button {
+    min-height: 40px;
+    border: 1px solid #62636c;
+    border-radius: 6px;
+    background: #393a42;
+    color: white;
+    font-weight: 900;
+}
+
+.rag-rebuild-stage {
+    position: relative;
+    width: min(900px, 100%);
+    max-height: 58vh;
+    margin: 0 auto;
+    overflow: hidden;
+    border: 1px solid #777982;
+    background: #101116;
+    touch-action: none;
+    user-select: none;
+}
+
+.rag-rebuild-source,
+.rag-rebuild-region-layer {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+
+.rag-rebuild-source {
+    object-fit: fill;
+}
+
+.rag-rebuild-region-layer {
+    overflow: hidden;
+}
+
+.rag-rebuild-region {
+    position: absolute;
+    box-sizing: border-box;
+    border: 2px solid #42d9ff;
+    background: rgba(36,169,221,.12);
+    box-shadow: 0 0 0 1px rgba(0,0,0,.75);
+    touch-action: none;
+}
+
+.rag-rebuild-region[data-type="panel"] {
+    border-color: #a76dff;
+    background: rgba(145,69,255,.10);
+}
+
+.rag-rebuild-region[data-type="root"] {
+    border: 3px dashed #fff;
+    background: rgba(0,0,0,.08);
+    box-shadow: 0 0 0 9999px rgba(0,0,0,.28);
+}
+
+.rag-rebuild-region[data-type="header"] {
+    border-color: #ffbd42;
+    background: rgba(255,174,34,.10);
+}
+
+.rag-rebuild-region[data-type="button"] {
+    border-color: #52ee83;
+    background: rgba(47,218,101,.12);
+}
+
+.rag-rebuild-region[data-type="label"] {
+    border-color: #fff25a;
+    background: rgba(255,239,54,.12);
+}
+
+.rag-rebuild-region[data-type="ignore"] {
+    border-color: #e45a5a;
+    background: rgba(220,55,55,.14);
+    opacity: .58;
+}
+
+.rag-rebuild-region.selected {
+    border-width: 3px;
+    box-shadow: 0 0 0 2px white, 0 0 12px rgba(78,176,255,.9);
+}
+
+.rag-rebuild-region > span {
+    position: absolute;
+    left: 0;
+    top: 0;
+    max-width: 100%;
+    padding: 2px 4px;
+    overflow: hidden;
+    border-radius: 0 0 4px 0;
+    background: rgba(0,0,0,.78);
+    color: white;
+    font: 800 8px/1.2 sans-serif;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+.rag-rebuild-region:not(.selected) .rag-crop-handle {
+    display: none;
+}
+
+.rag-rebuild-region .rag-crop-handle {
+    width: 18px;
+    height: 18px;
+    background: #fff;
+}
+
+.rag-rebuild-status {
+    margin: 8px 0;
+    padding: 7px;
+    border-radius: 6px;
+    background: #17181d;
+    color: #9fd8ff;
+    text-align: center;
+    font: 700 10px/1.3 monospace;
+}
+
+.rag-rebuild-selection-tools {
+    display: grid;
+    grid-template-columns: 1fr minmax(150px,.45fr);
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.rag-rebuild-selection-tools label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #dcb7ff;
+    font: 900 9px/1.2 sans-serif;
+}
+
+.rag-rebuild-selection-tools select {
+    flex: 1;
+    min-height: 40px;
+    border: 1px solid #696a72;
+    border-radius: 6px;
+    background: #18191e;
+    color: white;
+    font-weight: 800;
+}
+
+.rag-rebuild-reference-option {
+    display: block;
+    margin: 7px 0;
+    color: #bfc0c7;
+    font: 700 10px/1.3 sans-serif;
+}
+
+.rag-rebuild-reference-option input {
+    width: 18px;
+    height: 18px;
+    vertical-align: middle;
+}
+
+.rag-rebuild-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.rag-rebuild-actions button {
+    flex: 1;
+}
+
+.rag-rebuild-actions button.primary {
+    border-color: #4fa7eb;
+    background: linear-gradient(135deg,#176497,#7c3cc2);
+}
+
+.rag-ui-reference {
+    position: absolute;
+    inset: 0;
+    z-index: 2147480000;
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+    pointer-events: none;
+    user-select: none;
+}
+
+.rag-reference-toolbar {
+    position: fixed;
+    left: 50%;
+    bottom: 12px;
+    z-index: 300100;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    max-width: calc(100vw - 24px);
+    padding: 8px;
+    border: 1px solid #5ba7ff;
+    border-radius: 9px;
+    background: rgba(24,25,30,.96);
+    color: white;
+    transform: translateX(-50%);
+    box-shadow: 0 6px 24px rgba(0,0,0,.5);
+}
+
+.rag-reference-toolbar strong {
+    max-width: 230px;
+    overflow: hidden;
+    font: 900 9px/1.2 sans-serif;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rag-reference-toolbar input {
+    width: min(180px, 24vw);
+}
+
+@media (max-width: 700px) {
+    .rag-rebuild-analysis,
+    .rag-rebuild-selection-tools {
+        grid-template-columns: 1fr;
+    }
+
+    .rag-rebuild-stage {
+        max-height: 52vh;
+    }
+
+    .rag-rebuild-actions {
+        flex-direction: column;
+    }
+
+    .rag-rebuild-analysis button,
+    .rag-rebuild-selection-tools button,
+    .rag-rebuild-selection-tools select,
+    .rag-rebuild-actions button {
+        min-height: 48px;
+    }
+
+    .rag-reference-toolbar {
+        right: 8px;
+        left: 8px;
+        flex-wrap: wrap;
+        transform: none;
+    }
+}
+
 .rag-crop-edit-button {
     background:
         linear-gradient(135deg,#245179,#315f93)
@@ -13042,6 +14986,7 @@
 
         installCopyPasteButtons(mods);
         installExpandedSidebar(mods);
+        installScreenshotRebuilder(mods);
         installExplorerDock();
 
         await installImageParentLock();
