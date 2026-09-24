@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v37-role-scoped-nine-slice";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v38-button-default-size";
 
-    const BUILD = "v37-role-scoped-nine-slice";
+    const BUILD = "v38-button-default-size";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -2090,20 +2090,36 @@
                 this.button?.dataset?.ragAutoCenterLabel === "true" ||
                 buttonLabelIsCentered(this);
 
-            // The upstream constructor enlarges every texture to 80% of its
-            // parent. Small button PNGs therefore become enormous. Keep their
-            // intrinsic size and only shrink when they do not fit.
+            // A 9-slice source (often 12x12) is a pixel template, not its
+            // intended on-screen dimensions. Start it at the editor's native
+            // 64 JSON-UI units while still respecting a very small parent.
             if (updateImage && imageDataState?.png) {
-                const imageWidth = Math.max(1, imageDataState.png.width || 1);
-                const imageHeight = Math.max(1, imageDataState.png.height || 1);
-                const scale = Math.min(
-                    1,
-                    Math.max(1, width) / imageWidth,
-                    Math.max(1, height) / imageHeight
-                );
+                if (imageDataState.json) {
+                    const scalar =
+                        Number(mods.config.magicNumbers.UI_SCALAR) || 0.36;
+                    const defaultButtonSize = 64 / scalar;
 
-                width = imageWidth * scale;
-                height = imageHeight * scale;
+                    width = Math.min(
+                        Math.max(1, width),
+                        defaultButtonSize
+                    );
+                    height = Math.min(
+                        Math.max(1, height),
+                        defaultButtonSize
+                    );
+                } else {
+                    const imageWidth = Math.max(1, imageDataState.png.width || 1);
+                    const imageHeight = Math.max(1, imageDataState.png.height || 1);
+                    const scale = Math.min(
+                        1,
+                        Math.max(1, width) / imageWidth,
+                        Math.max(1, height) / imageHeight
+                    );
+
+                    width = imageWidth * scale;
+                    height = imageHeight * scale;
+                }
+
                 updateImage = false;
             }
 
