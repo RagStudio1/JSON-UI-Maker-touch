@@ -1,18 +1,20 @@
-JSON-UI-Maker Patch v34
-Build: v34-compound-button-import
+JSON-UI-Maker Patch v35
+Build: v35-image-role-selector
 
-IMPORTACAO E CRIACAO DE BOTOES:
-- botoes agora sao importados como um unico componente composto
-- fundo, texto, icone e estados default/hover/pressed permanecem sincronizados
-- controles internos de estado nao viram imagens e labels duplicados
-- imagens pequenas de botao nao sao mais ampliadas para 80% do painel pai
-- a textura preserva seu tamanho original e apenas encolhe quando nao cabe
-- o texto inicial fica realmente centralizado dentro do botao
-- redimensionar um botao mantem centralizado um texto que ja estava no centro
-- offsets personalizados de texto continuam preservados
-- trocar texturas nao altera a caixa atual do botao
-- round-trip restaura texto, icone e a ausencia de icone sem placeholder fantasma
-- fallbacks de textura ausente tambem funcionam no componente de botao
+SELETOR DE FUNCAO DA IMAGEM:
+- o seletor de assets agora pergunta como a imagem sera usada
+- opcoes: imagem normal/icone, background, borda/frame e header editavel
+- background preenche o painel selecionado, usa camada 10 e continua editavel
+- borda preenche o painel, usa camada 60 e nao bloqueia cliques internos
+- header cria um painel filho real na camada 120
+- apenas um background e uma borda ficam marcados por painel
+- a escolha volta para imagem normal depois de cada adicao
 
-Mantem V33 fallbacks legiveis, V32 Selection Drag Lock, V31 round-trip,
-V30 Explorer Mobile + Panel Lock, V29 Show Grid e assets Nordic.
+CONVERSAO DE IMAGENS EXISTENTES:
+- propriedades da imagem agora incluem FUNCAO DA IMAGEM
+- uma imagem ja adicionada pode virar background, borda ou header
+- background e borda podem voltar a ser imagens normais
+- Explorer atualiza os nomes para BACKGROUND, BORDER e IMAGE
+
+Mantem V34 botoes compostos, V33 fallbacks legiveis, V32 Selection Drag
+Lock, V31 round-trip, V30 Explorer Mobile + Panel Lock e V29 Show Grid.

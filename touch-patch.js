@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v34-compound-button-import";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v35-image-role-selector";
 
-    const BUILD = "v34-compound-button-import";
+    const BUILD = "v35-image-role-selector";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -962,6 +962,177 @@
         );
     }
 
+    function imageRoleSelect() {
+        return document.querySelector(
+            "#modalChooseImage .rag-image-role-select"
+        );
+    }
+
+    function selectedImageRole() {
+        return imageRoleSelect()?.value || "image";
+    }
+
+    function resetImageRole() {
+        const select = imageRoleSelect();
+        if (select) select.value = "image";
+    }
+
+    function newlyAddedCanvas(before, mods) {
+        for (const [id, instance] of mods.index.GLOBAL_ELEMENT_MAP.entries()) {
+            if (!before.has(id) && instance instanceof mods.DraggableCanvas) {
+                return instance;
+            }
+        }
+
+        return null;
+    }
+
+    function clearPreviousImageRole(parent, role, except, mods) {
+        for (const child of parent.children) {
+            if (
+                child === except ||
+                !(child instanceof HTMLElement) ||
+                child.dataset.ragBorderSystemRole !== role
+            ) {
+                continue;
+            }
+
+            delete child.dataset.ragBorderSystemRole;
+            delete child.dataset.ragBorderBackground;
+            delete child.dataset.ragBackgroundInitialized;
+            delete child.dataset.ragImportedImageRole;
+            delete child.dataset.ragFixedDecorative;
+            child.dataset.ragExplorerName = "IMAGE";
+            child.style.pointerEvents = "auto";
+            child.style.zIndex = "30";
+
+            const old = mods.index.GLOBAL_ELEMENT_MAP.get(child.dataset.id);
+            old?.gridElement?.style.setProperty("pointer-events", "auto");
+            if (old?.resizeHandle) old.resizeHandle.style.display = "block";
+            old?.setEditable?.(true);
+        }
+    }
+
+    function fitRoleImageToParent(instance) {
+        const parentRect = instance.container.getBoundingClientRect();
+        const width =
+            parseFloat(instance.container.style.width) ||
+            parentRect.width ||
+            1;
+        const height =
+            parseFloat(instance.container.style.height) ||
+            parentRect.height ||
+            1;
+
+        instance.canvasHolder.style.left = "0px";
+        instance.canvasHolder.style.top = "0px";
+        instance.canvasHolder.dataset.ragKeepAspect = "false";
+        instance.drawImage(width, height, false);
+        instance.aspectRatio = width / Math.max(1, height);
+    }
+
+    function keepPanelContentAboveBackground(parent, background) {
+        for (const child of parent.children) {
+            if (
+                child === background ||
+                !(child instanceof HTMLElement) ||
+                child.dataset.skip === "true" ||
+                child.dataset.ragBorderSystemRole === "border" ||
+                child.dataset.ragHeader === "true"
+            ) {
+                continue;
+            }
+
+            const layer = Number(child.style.zIndex);
+            if (!Number.isFinite(layer) || layer <= 10) {
+                child.style.zIndex = "20";
+            }
+        }
+    }
+
+    function applyImportedImageRole(instance, role, mods) {
+        if (!instance) return;
+
+        const element = instance.canvasHolder;
+        const parent = instance.container;
+
+        if (role === "image") {
+            const previousRole = element.dataset.ragBorderSystemRole;
+            delete element.dataset.ragBorderSystemRole;
+            delete element.dataset.ragImportedImageRole;
+            delete element.dataset.ragBorderBackground;
+            delete element.dataset.ragBackgroundInitialized;
+            delete element.dataset.ragFixedDecorative;
+            element.dataset.ragExplorerName = "IMAGE";
+            element.style.pointerEvents = "auto";
+            instance.gridElement.style.pointerEvents = "auto";
+            instance.resizeHandle.style.display = "block";
+            instance.setEditable?.(true);
+
+            if (previousRole === "background" || previousRole === "border") {
+                element.style.zIndex = "30";
+            }
+
+            mods.index.Builder.updateExplorer();
+            mods.updatePropertiesArea();
+            return;
+        }
+
+        clearPreviousImageRole(parent, role, element, mods);
+        fitRoleImageToParent(instance);
+
+        element.dataset.ragBorderSystemRole = role;
+        element.dataset.ragImportedImageRole = role;
+
+        if (role === "background") {
+            element.dataset.ragBorderBackground = "true";
+            element.dataset.ragBackgroundInitialized = "true";
+            element.dataset.ragExplorerName = "BACKGROUND";
+            delete element.dataset.ragFixedDecorative;
+            element.style.zIndex = "10";
+            element.style.pointerEvents = "auto";
+            instance.gridElement.style.pointerEvents = "auto";
+            instance.resizeHandle.style.display = "block";
+            instance.setEditable?.(true);
+            keepPanelContentAboveBackground(parent, element);
+        } else if (role === "border") {
+            element.dataset.ragExplorerName = "BORDER";
+            element.dataset.ragFixedDecorative = "true";
+            element.style.zIndex = "60";
+            element.style.pointerEvents = "none";
+            instance.gridElement.style.pointerEvents = "none";
+            instance.resizeHandle.style.display = "none";
+            instance.setEditable?.(false);
+        }
+
+        mods.index.Builder.updateExplorer();
+        mods.updatePropertiesArea();
+    }
+
+    async function createImportedHeader(texturePath, mods) {
+        const panel = selectedPanelForChrome(mods);
+
+        if (!panel) {
+            showBanner(
+                "Selecione um painel antes de adicionar um header.",
+                "error"
+            );
+            return null;
+        }
+
+        const header = await createEditableHeader(panel, mods, texturePath);
+
+        if (header) {
+            showBanner(
+                "Imagem adicionada como HEADER editavel.",
+                "success"
+            );
+        }
+
+
+        return header;
+    }
+
     async function installImageParentLock() {
         const mods = await loadModules();
         const Builder = window.Builder;
@@ -975,6 +1146,7 @@
         Builder.openAddImageMenu = async function (...args) {
             const previous = imageParentLock;
             imageParentLock = resolveImageContainer() || selectedMainElement();
+            resetImageRole();
 
             try {
                 return await oldOpen.apply(this, args);
@@ -986,11 +1158,39 @@
         Builder.addCanvas = function (...args) {
             restoreImageParent();
 
+            const role = selectedImageRole();
+
+            if (role === "header") {
+                const texturePath = args[1];
+                resetImageRole();
+                void createImportedHeader(texturePath, mods);
+                return;
+            }
+
+            const before = new Set(
+                mods.index.GLOBAL_ELEMENT_MAP.keys()
+            );
+
             // V21:
             // Keep the native sidecar passed by the original editor.
             // The custom 9-slice EDITOR stays removed, but rendering support
             // is necessary for backgrounds/buttons that already depend on it.
-            return oldAdd.apply(this, args);
+            const result = oldAdd.apply(this, args);
+            const added = newlyAddedCanvas(before, mods);
+
+            applyImportedImageRole(added, role, mods);
+
+            if (role !== "image" && added) {
+                showBanner(
+                    role === "background"
+                        ? "Imagem adicionada como BACKGROUND do painel."
+                        : "Imagem adicionada como BORDA fixa do painel.",
+                    "success"
+                );
+            }
+
+            resetImageRole();
+            return result;
         };
     }
 
@@ -1167,6 +1367,33 @@
         const wrapper = document.createElement("div");
         wrapper.className = "rag-file-picker";
 
+        const roleBox = document.createElement("label");
+        roleBox.className = "rag-image-role-box";
+
+        const roleTitle = document.createElement("span");
+        roleTitle.textContent = "USAR ESTA IMAGEM COMO:";
+
+        const roleSelect = document.createElement("select");
+        roleSelect.className = "rag-image-role-select";
+
+        for (const [value, label] of [
+            ["image", "Imagem normal / icone"],
+            ["background", "Background do painel"],
+            ["border", "Borda / frame do painel"],
+            ["header", "Header editavel do painel"],
+        ]) {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = label;
+            roleSelect.appendChild(option);
+        }
+
+        const roleHelp = document.createElement("small");
+        roleHelp.textContent =
+            "Background e borda preenchem o painel selecionado automaticamente.";
+
+        roleBox.append(roleTitle, roleSelect, roleHelp);
+
         const filesButton = document.createElement("button");
         filesButton.type = "button";
         filesButton.textContent = "ESCOLHER ARQUIVO";
@@ -1228,6 +1455,7 @@
         });
 
         wrapper.append(
+            roleBox,
             filesButton,
             galleryButton,
             status,
@@ -10897,6 +11125,75 @@
             pathLabel.appendChild(nativeBadge);
         }
 
+        const roleEditor = document.createElement("label");
+        roleEditor.className = "rag-image-property-role";
+
+        const roleEditorTitle = document.createElement("span");
+        roleEditorTitle.textContent = "FUNCAO DA IMAGEM";
+
+        const roleEditorSelect = document.createElement("select");
+
+        for (const [value, label] of [
+            ["image", "Imagem normal / icone"],
+            ["background", "Background do painel"],
+            ["border", "Borda / frame do painel"],
+            ["header", "Transformar em header"],
+        ]) {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = label;
+            roleEditorSelect.appendChild(option);
+        }
+
+        const currentRole =
+            instance.canvasHolder.dataset.ragBorderSystemRole;
+
+        roleEditorSelect.value =
+            currentRole === "background" || currentRole === "border"
+                ? currentRole
+                : "image";
+
+        roleEditorSelect.addEventListener("change", async () => {
+            const role = roleEditorSelect.value;
+            roleEditorSelect.disabled = true;
+
+            try {
+                if (role === "header") {
+                    const header = await createImportedHeader(
+                        instance.canvasHolder.dataset.imagePath,
+                        mods
+                    );
+
+                    if (header) {
+                        mods.index.Builder.delete(id);
+                    } else {
+                        roleEditorSelect.value = "image";
+                    }
+                } else {
+                    applyImportedImageRole(instance, role, mods);
+                    showBanner(
+                        role === "background"
+                            ? "Imagem convertida em BACKGROUND."
+                            : role === "border"
+                            ? "Imagem convertida em BORDA fixa."
+                            : "Imagem convertida em item normal.",
+                        "success"
+                    );
+                }
+            } catch (error) {
+                console.error(error);
+                roleEditorSelect.value = "image";
+                showBanner(
+                    `Falha ao mudar funcao: ${error?.message || error}`,
+                    "error"
+                );
+            } finally {
+                roleEditorSelect.disabled = false;
+            }
+        });
+
+        roleEditor.append(roleEditorTitle, roleEditorSelect);
+
         const aspect = document.createElement("button");
         aspect.type = "button";
         aspect.className = "propertyInputButton";
@@ -11008,6 +11305,7 @@
 
         box.append(
             pathLabel,
+            roleEditor,
             aspect,
             fill,
             cropTexture,
@@ -11232,6 +11530,42 @@
     border: 1px solid rgba(159,54,220,.48);
     border-radius: 9px;
     background: rgba(20,20,23,.76);
+}
+
+.rag-image-role-box,
+.rag-image-property-role {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin: 0 0 10px;
+    color: #e7c5ff;
+    font: 900 10px/1.2 sans-serif;
+}
+
+.rag-image-role-box select,
+.rag-image-property-role select {
+    width: 100%;
+    min-height: 42px;
+    padding: 6px 8px;
+    border: 1px solid #a542de;
+    border-radius: 6px;
+    background: #252329;
+    color: white;
+    font-weight: 800;
+}
+
+.rag-image-role-box small {
+    color: #aaa;
+    font-size: 9px;
+    font-weight: 500;
+}
+
+.rag-image-property-role {
+    margin-top: 8px;
+    padding: 8px;
+    border: 1px solid rgba(165,66,222,.45);
+    border-radius: 6px;
+    background: rgba(42,28,49,.65);
 }
 
 .rag-file-picker button {
