@@ -1,5 +1,12 @@
-JSON-UI-Maker Patch v27
-Build: v27-layer-editor-fix
+JSON-UI-Maker Patch v28
+Build: v28-original-show-grid
+
+SHOW GRID:
+- restaurado o comportamento original de SebTheSigma/JSON-UI-Maker
+- grid aparece somente durante o arraste, conforme a configuracao Show Grid
+- removida a camada magenta persistente que cobria detalhes das imagens
+- removida a varredura de todos os elementos a cada selecao/arraste
+- preservados os pontos, handles e hit testing originais
 
 LAYER ORDER CORRIGIDA:
 - BACKGROUND: z-index 10, EDITAVEL

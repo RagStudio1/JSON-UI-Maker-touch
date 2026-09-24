@@ -10948,7 +10948,6 @@
 
         patchClipsChildrenExport(mods);
         patchAdvancedControlExport(mods);
-        patchGridSystem(mods);
         patchNestedPanelDrag(mods);
         patchCopyPasteMetadata(mods);
         patchCopyPasteAutoChrome(mods);
