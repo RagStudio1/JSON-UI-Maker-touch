@@ -1,0 +1,15 @@
+{
+  "$schema": "https://ragstudio1.github.io/JSON-UI-Maker-touch/ui-package.schema.json",
+  "format": "json-ui-maker-package",
+  "version": 1,
+  "name": "Minha UI completa",
+  "entry": "ui/main.json",
+  "assets": [
+    {
+      "path": "textures",
+      "mount": ""
+    }
+  ],
+  "root": "main_screen",
+  "persistAssets": true
+}

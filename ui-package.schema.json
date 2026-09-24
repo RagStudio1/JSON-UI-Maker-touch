@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ragstudio1.github.io/JSON-UI-Maker-touch/ui-package.schema.json",
+  "title": "JSON UI Maker - pacote completo de UI",
+  "description": "Manifesto que liga um JSON de UI as imagens e aos sidecars 9-slice do mesmo pacote.",
+  "type": "object",
+  "required": [
+    "format",
+    "version",
+    "entry",
+    "assets"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "format": {
+      "const": "json-ui-maker-package"
+    },
+    "version": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entry": {
+      "description": "Caminho do JSON principal, relativo ao ui-package.json.",
+      "type": "string",
+      "minLength": 1
+    },
+    "assets": {
+      "description": "Pastas de imagens do pacote e os prefixos virtuais usados pela UI.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          {
+            "type": "string",
+            "minLength": 1
+          },
+          {
+            "type": "object",
+            "required": [
+              "path"
+            ],
+            "properties": {
+              "path": {
+                "description": "Pasta de imagens relativa ao manifesto.",
+                "type": "string",
+                "minLength": 1
+              },
+              "mount": {
+                "description": "Prefixo virtual adicionado ao caminho da textura. Vazio preserva o caminho interno da pasta.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "root": {
+      "description": "Definicao inicial para JSON UI universal com mais de uma raiz.",
+      "type": "string",
+      "minLength": 1
+    },
+    "persistAssets": {
+      "description": "Salva os assets no armazenamento do navegador para reutiliza-los apos recarregar a pagina.",
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "additionalProperties": false
+}

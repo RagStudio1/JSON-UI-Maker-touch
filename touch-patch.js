@@ -14,6 +14,7 @@
  * - Hybrid JSON importer:
  *      native editor JSON -> original importer
  *      ordinary Bedrock JSON UI -> lazy best-effort importer
+ * - Complete ZIP/folder packages with manifest, UI and linked assets
  * - Lazy smart texture resolver, no bulk preload at page startup
  * - Missing textures get fallback under their ORIGINAL path
  */
@@ -22,9 +23,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v45-responsive-panel-children";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v46-complete-ui-package";
 
-    const BUILD = "v45-responsive-panel-children";
+    const BUILD = "v46-complete-ui-package";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -4266,6 +4267,918 @@
             badge.textContent = " AUTO";
             label.appendChild(badge);
         }
+    }
+
+    // ============================================================
+    // Complete UI package importer (UI JSON + linked assets)
+    // ============================================================
+
+    const UI_PACKAGE_FORMAT = "json-ui-maker-package";
+    const UI_PACKAGE_MAX_ENTRIES = 2500;
+    const UI_PACKAGE_MAX_FILE_BYTES = 96 * 1024 * 1024;
+    const UI_PACKAGE_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+
+    function packagePathParts(value, allowParent = false) {
+        const raw = String(value || "")
+            .replace(/\\/g, "/")
+            .replace(/^\.\//, "");
+
+        if (
+            raw.includes("\0") ||
+            raw.startsWith("/") ||
+            /^[a-z]:\//i.test(raw)
+        ) {
+            throw new Error(`Caminho inseguro no pacote: ${value}`);
+        }
+
+        const out = [];
+
+        for (const part of raw.split("/")) {
+            if (!part || part === ".") continue;
+
+            if (part === "..") {
+                if (!allowParent || !out.length) {
+                    throw new Error(`Caminho inseguro no pacote: ${value}`);
+                }
+
+                out.pop();
+                continue;
+            }
+
+            out.push(part);
+        }
+
+        return out;
+    }
+
+    function normalizePackagePath(value) {
+        return packagePathParts(value).join("/");
+    }
+
+    function packageDirectory(value) {
+        const parts = normalizePackagePath(value).split("/");
+        parts.pop();
+        return parts.join("/");
+    }
+
+    function resolvePackagePath(base, relative) {
+        const baseParts = packagePathParts(base);
+        const raw = String(relative || "").replace(/\\/g, "/");
+
+        if (raw.startsWith("/") || /^[a-z]:\//i.test(raw)) {
+            throw new Error(`Caminho absoluto nao permitido: ${relative}`);
+        }
+
+        const out = [...baseParts];
+
+        for (const part of raw.split("/")) {
+            if (!part || part === ".") continue;
+
+            if (part === "..") {
+                if (!out.length) {
+                    throw new Error(
+                        `O caminho sai da raiz do pacote: ${relative}`
+                    );
+                }
+
+                out.pop();
+            } else {
+                out.push(part);
+            }
+        }
+
+        return out.join("/");
+    }
+
+    function packageBaseName(value) {
+        return normalizePackagePath(value).split("/").pop() || "";
+    }
+
+    function packageMimeType(path) {
+        const extension = String(path).split(".").pop()?.toLowerCase();
+
+        return {
+            png: "image/png",
+            jpg: "image/jpeg",
+            jpeg: "image/jpeg",
+            webp: "image/webp",
+            json: "application/json",
+        }[extension] || "application/octet-stream";
+    }
+
+    function findZipEnd(bytes, view) {
+        const minimum = Math.max(0, bytes.length - 22 - 0xffff);
+
+        for (let offset = bytes.length - 22; offset >= minimum; offset--) {
+            if (
+                view.getUint32(offset, true) === 0x06054b50 &&
+                offset + 22 + view.getUint16(offset + 20, true) === bytes.length
+            ) {
+                return offset;
+            }
+        }
+
+        return -1;
+    }
+
+    async function inflateZipEntry(entry) {
+        if (entry.bytes) return entry.bytes;
+
+        if (entry.uncompressedSize > UI_PACKAGE_MAX_FILE_BYTES) {
+            throw new Error(
+                `Arquivo grande demais no pacote: ${entry.path}`
+            );
+        }
+
+        let bytes;
+
+        if (entry.method === 0) {
+            bytes = entry.compressed.slice();
+        } else if (entry.method === 8) {
+            if (typeof DecompressionStream !== "function") {
+                throw new Error(
+                    "Este navegador nao consegue descompactar ZIP. " +
+                    "Use uma versao recente do Chrome ou importe a pasta."
+                );
+            }
+
+            let stream;
+
+            try {
+                stream = new Blob([entry.compressed])
+                    .stream()
+                    .pipeThrough(new DecompressionStream("deflate-raw"));
+            } catch (_) {
+                throw new Error(
+                    `Nao foi possivel descompactar ${entry.path}. ` +
+                    "Tente recriar o ZIP ou importar a pasta."
+                );
+            }
+
+            bytes = new Uint8Array(
+                await new Response(stream).arrayBuffer()
+            );
+        } else {
+            throw new Error(
+                `Compactacao ZIP nao suportada (${entry.method}) em ${entry.path}.`
+            );
+        }
+
+        if (
+            Number.isFinite(entry.uncompressedSize) &&
+            bytes.length !== entry.uncompressedSize
+        ) {
+            throw new Error(`Arquivo ZIP corrompido: ${entry.path}`);
+        }
+
+        entry.bytes = bytes;
+        return bytes;
+    }
+
+    async function zipPackageEntries(file) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const view = new DataView(
+            bytes.buffer,
+            bytes.byteOffset,
+            bytes.byteLength
+        );
+        const end = findZipEnd(bytes, view);
+
+        if (end < 0) {
+            throw new Error("ZIP invalido: diretorio central nao encontrado.");
+        }
+
+        const disk = view.getUint16(end + 4, true);
+        const centralDisk = view.getUint16(end + 6, true);
+        const entryCount = view.getUint16(end + 10, true);
+        const centralOffset = view.getUint32(end + 16, true);
+
+        if (disk !== 0 || centralDisk !== 0) {
+            throw new Error("ZIP dividido em partes nao e suportado.");
+        }
+
+        if (
+            entryCount === 0xffff ||
+            centralOffset === 0xffffffff
+        ) {
+            throw new Error("ZIP64 nao e suportado. Importe a pasta.");
+        }
+
+        if (entryCount > UI_PACKAGE_MAX_ENTRIES) {
+            throw new Error(
+                `Pacote possui arquivos demais (${entryCount}).`
+            );
+        }
+
+        const decoder = new TextDecoder("utf-8");
+        const entries = new Map();
+        let offset = centralOffset;
+        let totalSize = 0;
+
+        for (let index = 0; index < entryCount; index++) {
+            if (
+                offset + 46 > bytes.length ||
+                view.getUint32(offset, true) !== 0x02014b50
+            ) {
+                throw new Error("Diretorio central do ZIP esta corrompido.");
+            }
+
+            const flags = view.getUint16(offset + 8, true);
+            const method = view.getUint16(offset + 10, true);
+            const compressedSize = view.getUint32(offset + 20, true);
+            const uncompressedSize = view.getUint32(offset + 24, true);
+            const nameLength = view.getUint16(offset + 28, true);
+            const extraLength = view.getUint16(offset + 30, true);
+            const commentLength = view.getUint16(offset + 32, true);
+            const localOffset = view.getUint32(offset + 42, true);
+            const nameStart = offset + 46;
+            const nameEnd = nameStart + nameLength;
+
+            if (nameEnd > bytes.length) {
+                throw new Error("Nome de arquivo invalido no ZIP.");
+            }
+
+            const rawName = decoder.decode(bytes.subarray(nameStart, nameEnd));
+            const isDirectory = rawName.endsWith("/");
+            const path = normalizePackagePath(rawName);
+
+            offset = nameEnd + extraLength + commentLength;
+
+            if (!path || isDirectory || path.startsWith("__MACOSX/")) {
+                continue;
+            }
+
+            if (flags & 0x1) {
+                throw new Error(`ZIP protegido por senha: ${path}`);
+            }
+
+            if (
+                compressedSize === 0xffffffff ||
+                uncompressedSize === 0xffffffff ||
+                localOffset === 0xffffffff
+            ) {
+                throw new Error("ZIP64 nao e suportado. Importe a pasta.");
+            }
+
+            if (uncompressedSize > UI_PACKAGE_MAX_FILE_BYTES) {
+                throw new Error(`Arquivo grande demais no pacote: ${path}`);
+            }
+
+            totalSize += uncompressedSize;
+            if (totalSize > UI_PACKAGE_MAX_TOTAL_BYTES) {
+                throw new Error("O pacote descompactado ultrapassa 256 MB.");
+            }
+
+            if (
+                localOffset + 30 > bytes.length ||
+                view.getUint32(localOffset, true) !== 0x04034b50
+            ) {
+                throw new Error(`Cabecalho ZIP invalido: ${path}`);
+            }
+
+            const localNameLength = view.getUint16(localOffset + 26, true);
+            const localExtraLength = view.getUint16(localOffset + 28, true);
+            const dataStart =
+                localOffset + 30 + localNameLength + localExtraLength;
+            const dataEnd = dataStart + compressedSize;
+
+            if (dataEnd > bytes.length) {
+                throw new Error(`Dados truncados no ZIP: ${path}`);
+            }
+
+            if (entries.has(path)) {
+                throw new Error(`Arquivo duplicado no pacote: ${path}`);
+            }
+
+            const entry = {
+                path,
+                method,
+                uncompressedSize,
+                compressed: bytes.subarray(dataStart, dataEnd),
+                bytes: null,
+            };
+
+            entry.readBytes = () => inflateZipEntry(entry);
+            entries.set(path, entry);
+        }
+
+        return entries;
+    }
+
+    function folderPackageEntries(files) {
+        const entries = new Map();
+
+        if (files.length > UI_PACKAGE_MAX_ENTRIES) {
+            throw new Error(`A pasta possui arquivos demais (${files.length}).`);
+        }
+
+        let totalSize = 0;
+
+        for (const file of files) {
+            const rawPath =
+                file.webkitRelativePath ||
+                file._webkitRelativePath ||
+                file.name;
+            const path = normalizePackagePath(rawPath);
+
+            if (!path || path.startsWith("__MACOSX/")) continue;
+            if (file.size > UI_PACKAGE_MAX_FILE_BYTES) {
+                throw new Error(`Arquivo grande demais no pacote: ${path}`);
+            }
+
+            totalSize += file.size;
+            if (totalSize > UI_PACKAGE_MAX_TOTAL_BYTES) {
+                throw new Error("A pasta ultrapassa 256 MB.");
+            }
+
+            entries.set(path, {
+                path,
+                uncompressedSize: file.size,
+                file,
+                readBytes: async () =>
+                    new Uint8Array(await file.arrayBuffer()),
+            });
+        }
+
+        return entries;
+    }
+
+    async function packageEntryText(entry) {
+        if (!entry) throw new Error("Arquivo ausente no pacote.");
+        const bytes = await entry.readBytes();
+        return new TextDecoder("utf-8").decode(bytes).replace(/^\uFEFF/, "");
+    }
+
+    function commonPackageRoot(paths) {
+        if (!paths.length) return "";
+
+        if (paths.length === 1) {
+            return packageDirectory(paths[0]);
+        }
+
+        const split = paths.map((path) => normalizePackagePath(path).split("/"));
+        const first = split[0];
+        let length = first.length;
+
+        for (const parts of split.slice(1)) {
+            length = Math.min(length, parts.length);
+            let index = 0;
+
+            while (index < length && parts[index] === first[index]) index++;
+            length = index;
+        }
+
+        return first.slice(0, length).join("/");
+    }
+
+    function isPackageSidecar(path, entries) {
+        if (!/\.json$/i.test(path)) return false;
+        const base = path.replace(/\.json$/i, "");
+
+        return ["png", "jpg", "jpeg", "webp"].some((extension) =>
+            entries.has(`${base}.${extension}`)
+        );
+    }
+
+    async function findUiPackageManifest(entries) {
+        const declared = [...entries.keys()]
+            .filter((path) => /(^|\/)ui-package\.json$/i.test(path))
+            .sort((a, b) => a.split("/").length - b.split("/").length);
+
+        if (declared.length > 1) {
+            throw new Error(
+                "O pacote possui mais de um ui-package.json. Mantenha apenas um."
+            );
+        }
+
+        if (declared.length === 1) {
+            const manifestPath = declared[0];
+            const manifest = parseJsonc(
+                await packageEntryText(entries.get(manifestPath))
+            );
+
+            return {
+                manifest,
+                manifestPath,
+                automatic: false,
+            };
+        }
+
+        const generic = [...entries.keys()]
+            .filter((path) => /(^|\/)manifest\.json$/i.test(path));
+
+        for (const manifestPath of generic) {
+            try {
+                const manifest = parseJsonc(
+                    await packageEntryText(entries.get(manifestPath))
+                );
+
+                if (manifest?.format === UI_PACKAGE_FORMAT) {
+                    return {
+                        manifest,
+                        manifestPath,
+                        automatic: false,
+                    };
+                }
+            } catch (_) {}
+        }
+
+        const candidates = [];
+
+        for (const path of entries.keys()) {
+            if (!/\.json$/i.test(path) || isPackageSidecar(path, entries)) {
+                continue;
+            }
+
+            try {
+                const parsed = parseJsonc(
+                    await packageEntryText(entries.get(path))
+                );
+                const namespace = sanitizeNamespace(
+                    parsed?.namespace || packageBaseName(path)
+                );
+
+                if (
+                    isNativeEditorJson(parsed) ||
+                    discoverRoots(parsed, namespace).length
+                ) {
+                    candidates.push(path);
+                }
+            } catch (_) {}
+        }
+
+        if (candidates.length !== 1) {
+            throw new Error(
+                candidates.length
+                    ? "Ha mais de um JSON de UI. Adicione ui-package.json para indicar o entry."
+                    : "ui-package.json nao encontrado e nenhum JSON de UI foi reconhecido."
+            );
+        }
+
+        const root = commonPackageRoot([...entries.keys()]);
+
+        return {
+            manifest: {
+                format: UI_PACKAGE_FORMAT,
+                version: 1,
+                name: packageBaseName(candidates[0]).replace(/\.json$/i, ""),
+                entry: candidates[0],
+                assets: [{ path: root || ".", mount: "" }],
+                persistAssets: true,
+            },
+            manifestPath: "",
+            automatic: true,
+        };
+    }
+
+    function validateUiPackageManifest(found, entries) {
+        const manifest = found.manifest;
+
+        if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+            throw new Error("ui-package.json deve conter um objeto JSON.");
+        }
+
+        if (manifest.format !== UI_PACKAGE_FORMAT) {
+            throw new Error(
+                `format deve ser "${UI_PACKAGE_FORMAT}".`
+            );
+        }
+
+        if (Number(manifest.version) !== 1) {
+            throw new Error(
+                `Versao de pacote nao suportada: ${manifest.version}`
+            );
+        }
+
+        if (typeof manifest.entry !== "string" || !manifest.entry.trim()) {
+            throw new Error("O manifesto precisa de entry, por exemplo ui/main.json.");
+        }
+
+        const base = found.automatic
+            ? ""
+            : packageDirectory(found.manifestPath);
+        const entryPath = resolvePackagePath(base, manifest.entry);
+
+        if (!entries.has(entryPath)) {
+            throw new Error(`UI principal nao encontrada: ${entryPath}`);
+        }
+
+        const rawAssets = manifest.assets == null
+            ? [{ path: "textures", mount: "" }]
+            : manifest.assets;
+
+        if (!Array.isArray(rawAssets) || !rawAssets.length) {
+            throw new Error("assets deve ser uma lista com pelo menos uma pasta.");
+        }
+
+        const assets = rawAssets.map((value, index) => {
+            const item = typeof value === "string"
+                ? { path: value, mount: "" }
+                : value;
+
+            if (!item || typeof item.path !== "string" || !item.path.trim()) {
+                throw new Error(`assets[${index}].path e obrigatorio.`);
+            }
+
+            const path = resolvePackagePath(base, item.path);
+            const mount = normalizeTexture(item.mount || "");
+
+            return { path, mount };
+        });
+
+        return {
+            ...manifest,
+            entryPath,
+            assets,
+            persistAssets: manifest.persistAssets !== false,
+        };
+    }
+
+    function pathInsideAssetRoot(path, root) {
+        if (!root) return path;
+        if (path === root) return packageBaseName(path);
+        if (!path.startsWith(`${root}/`)) return null;
+        return path.slice(root.length + 1);
+    }
+
+    function virtualAssetPath(relative, mount) {
+        let path = normalizePackagePath(
+            [mount, relative].filter(Boolean).join("/")
+        );
+
+        path = path.replace(/^textures\//i, "");
+        if (!path) throw new Error("Caminho virtual de asset vazio.");
+        return path;
+    }
+
+    async function makeVirtualPackageFile(entry, virtualPath) {
+        const bytes = await entry.readBytes();
+        const file = new File(
+            [bytes],
+            packageBaseName(virtualPath),
+            { type: packageMimeType(virtualPath) }
+        );
+
+        Object.defineProperty(file, "_webkitRelativePath", {
+            configurable: true,
+            value: virtualPath,
+        });
+
+        return file;
+    }
+
+    async function collectPackageAssets(entries, manifest) {
+        const records = [];
+        const files = [];
+        const claimed = new Map();
+
+        for (const mapping of manifest.assets) {
+            for (const [path, entry] of entries) {
+                if (!/\.(png|jpe?g|webp)$/i.test(path)) continue;
+
+                const relative = pathInsideAssetRoot(path, mapping.path);
+                if (relative == null) continue;
+
+                const virtualImagePath = virtualAssetPath(
+                    relative,
+                    mapping.mount
+                );
+                const key = virtualImagePath.replace(/\.[^.]+$/, "");
+
+                if (claimed.has(key)) {
+                    throw new Error(
+                        `Dois assets geram o mesmo caminho "${key}": ` +
+                        `${claimed.get(key)} e ${path}`
+                    );
+                }
+
+                claimed.set(key, path);
+
+                const imageFile = await makeVirtualPackageFile(
+                    entry,
+                    virtualImagePath
+                );
+                const sidecarSourcePath = path.replace(/\.[^.]+$/, ".json");
+                const sidecarEntry = entries.get(sidecarSourcePath);
+                let sidecarFile = null;
+
+                files.push(imageFile);
+
+                if (sidecarEntry) {
+                    const virtualSidecarPath =
+                        virtualImagePath.replace(/\.[^.]+$/, ".json");
+                    sidecarFile = await makeVirtualPackageFile(
+                        sidecarEntry,
+                        virtualSidecarPath
+                    );
+                    files.push(sidecarFile);
+                }
+
+                records.push({
+                    key,
+                    imageFile,
+                    sidecarFile,
+                    sourcePath: path,
+                });
+            }
+        }
+
+        if (!records.length) {
+            throw new Error(
+                "Nenhuma imagem foi encontrada nas pastas declaradas em assets."
+            );
+        }
+
+        return { files, records };
+    }
+
+    async function persistPackageAssets(records) {
+        let persisted = 0;
+        let failed = false;
+
+        for (const record of records) {
+            try {
+                const dataUrl = await fileDataUrl(record.imageFile);
+                localStorage.setItem(
+                    `asset_${record.key}_png`,
+                    JSON.stringify({
+                        base64: dataUrl,
+                        metadata: {
+                            name: record.imageFile.name,
+                            relativePath: `textures/${record.key}.${record.imageFile.name.split(".").pop()}`,
+                            importedFromUiPackage: true,
+                        },
+                    })
+                );
+
+                if (record.sidecarFile) {
+                    const jsonContent = parseJsonc(
+                        await record.sidecarFile.text()
+                    );
+
+                    localStorage.setItem(
+                        `asset_${record.key}_json`,
+                        JSON.stringify({
+                            jsonContent,
+                            metadata: {
+                                name: record.sidecarFile.name,
+                                relativePath: `textures/${record.key}.json`,
+                                importedFromUiPackage: true,
+                            },
+                        })
+                    );
+                } else {
+                    localStorage.removeItem(`asset_${record.key}_json`);
+                }
+
+                persisted++;
+            } catch (error) {
+                console.warn(
+                    "Nao foi possivel persistir assets do pacote:",
+                    error
+                );
+                failed = true;
+                break;
+            }
+        }
+
+        return { persisted, failed };
+    }
+
+    async function importCompleteUiPackage(entries, sourceName) {
+        const mods = await loadModules();
+        const found = await findUiPackageManifest(entries);
+        const manifest = validateUiPackageManifest(found, entries);
+        const uiRaw = await packageEntryText(entries.get(manifest.entryPath));
+        const parsedUi = parseJsonc(uiRaw);
+        let requestedRoot = null;
+
+        if (manifest.root && !isNativeEditorJson(parsedUi)) {
+            const namespace = sanitizeNamespace(
+                parsedUi.namespace || packageBaseName(manifest.entryPath)
+            );
+            const roots = discoverRoots(parsedUi, namespace);
+            const requested = String(manifest.root);
+            const requestedShort = requested.includes(".")
+                ? requested.split(".").pop()
+                : requested;
+
+            requestedRoot = roots.includes(requested)
+                ? requested
+                : roots.includes(requestedShort)
+                    ? requestedShort
+                    : null;
+
+            if (!requestedRoot) {
+                throw new Error(
+                    `root "${requested}" nao existe em ${manifest.entryPath}.`
+                );
+            }
+        }
+
+        const { files, records } = await collectPackageAssets(entries, manifest);
+
+        showBanner(`Carregando ${records.length} assets de ${sourceName}...`);
+
+        await mods.FileUploader.processFileUpload(files);
+
+        for (const record of records) {
+            const state = mods.index.images.get(record.key);
+
+            if (state) {
+                delete state.__ragFallback;
+                delete state.__ragRequestedPath;
+
+                if (record.sidecarFile) {
+                    state.json = parseJsonc(
+                        await record.sidecarFile.text()
+                    );
+                } else {
+                    // Replacing a texture without a sidecar must also remove
+                    // old 9-slice metadata stored under the same key.
+                    delete state.json;
+                }
+            }
+
+            universalState.missingPaths.delete(record.key);
+        }
+
+        let persistence = { persisted: 0, failed: false };
+
+        if (manifest.persistAssets) {
+            persistence = await persistPackageAssets(records);
+        }
+
+        await importHybrid(uiRaw, packageBaseName(manifest.entryPath));
+
+        if (requestedRoot && universalState.parsed) {
+            if (requestedRoot !== universalState.root) {
+                await renderExternalRoot(requestedRoot);
+            }
+        }
+
+        const missing = universalState.missingPaths.size;
+        const persistenceNote = persistence.failed
+            ? ` • ${persistence.persisted}/${records.length} salvos no navegador`
+            : manifest.persistAssets
+                ? " • assets salvos no navegador"
+                : "";
+        const automaticNote = found.automatic
+            ? " • manifesto detectado automaticamente"
+            : "";
+
+        showBanner(
+            `${manifest.name || sourceName}: ${records.length} assets + UI carregados` +
+            `${missing ? ` • ${missing} textura(s) ausente(s)` : ""}` +
+            persistenceNote + automaticNote,
+            missing || persistence.failed ? "normal" : "success"
+        );
+
+        return {
+            manifest,
+            assets: records.length,
+            missing,
+            persistence,
+            automatic: found.automatic,
+        };
+    }
+
+    function setPackageImporterBusy(overlay, busy, status = "") {
+        overlay.dataset.busy = String(busy);
+
+        for (const button of overlay.querySelectorAll("button")) {
+            button.disabled = busy;
+        }
+
+        const output = overlay.querySelector(".rag-package-status");
+        if (output && status) output.textContent = status;
+    }
+
+    async function installCompleteUiImporter() {
+        if (document.querySelector(".rag-package-importer")) return;
+
+        const importers = document.querySelector(".importers");
+        if (!importers) return;
+
+        const openButton = document.createElement("button");
+        openButton.type = "button";
+        openButton.className = "rag-package-importer";
+        openButton.textContent = "UI + Assets";
+        openButton.title = "Importar UI completa com todas as texturas";
+
+        const overlay = document.createElement("div");
+        overlay.className = "rag-package-overlay";
+        overlay.hidden = true;
+        overlay.innerHTML = `
+            <section class="rag-package-card" role="dialog" aria-modal="true" aria-labelledby="rag-package-title">
+                <button type="button" class="rag-package-close" aria-label="Fechar">×</button>
+                <h2 id="rag-package-title">IMPORTAR UI COMPLETA</h2>
+                <p>Abra um ZIP ou uma pasta contendo <code>ui-package.json</code>, o JSON da UI e suas texturas. Os caminhos <code>textures/...</code> serao vinculados antes da UI ser criada.</p>
+                <pre>meu-pacote.zip
+├─ ui-package.json
+├─ ui/main.json
+└─ textures/ui/minha_ui/
+   ├─ background.png
+   ├─ button.png
+   └─ button.json   (9-slice opcional)</pre>
+                <div class="rag-package-actions">
+                    <button type="button" data-action="zip">ABRIR PACOTE ZIP</button>
+                    <button type="button" data-action="folder">ABRIR PASTA</button>
+                </div>
+                <div class="rag-package-links">
+                    <a href="./ui-package.example.json" download="ui-package.json">BAIXAR MANIFESTO</a>
+                    <a href="./ui-package.schema.json" download>BAIXAR ESQUEMA JSON</a>
+                    <a href="./UI_PACKAGE_FORMAT.md" target="_blank" rel="noopener">VER FORMATO</a>
+                </div>
+                <output class="rag-package-status">ZIP e recomendado no Android.</output>
+            </section>`;
+
+        const zipInput = document.createElement("input");
+        zipInput.type = "file";
+        zipInput.accept = ".zip,.mcpack,.mcaddon,application/zip";
+
+        const folderInput = document.createElement("input");
+        folderInput.type = "file";
+        folderInput.multiple = true;
+        folderInput.setAttribute("webkitdirectory", "");
+        folderInput.setAttribute("directory", "");
+
+        overlay.append(zipInput, folderInput);
+        document.body.appendChild(overlay);
+        importers.appendChild(openButton);
+
+        const close = () => {
+            if (overlay.dataset.busy === "true") return;
+            overlay.hidden = true;
+        };
+
+        const run = async (source, sourceName) => {
+            setPackageImporterBusy(
+                overlay,
+                true,
+                `Lendo ${sourceName}...`
+            );
+
+            try {
+                const entries = source instanceof File
+                    ? await zipPackageEntries(source)
+                    : folderPackageEntries(source);
+                const result = await importCompleteUiPackage(entries, sourceName);
+                const output = overlay.querySelector(".rag-package-status");
+
+                if (output) {
+                    output.textContent =
+                        `${result.assets} assets carregados` +
+                        `${result.missing ? `; ${result.missing} ausentes` : "; nenhum ausente"}.`;
+                }
+
+                setPackageImporterBusy(overlay, false);
+                setTimeout(() => {
+                    if (overlay.dataset.busy !== "true") overlay.hidden = true;
+                }, 900);
+            } catch (error) {
+                console.error(error);
+                setPackageImporterBusy(
+                    overlay,
+                    false,
+                    `ERRO: ${error?.message || error}`
+                );
+                showBanner(
+                    `Falha ao importar pacote: ${error?.message || error}`,
+                    "error"
+                );
+            } finally {
+                zipInput.value = "";
+                folderInput.value = "";
+            }
+        };
+
+        openButton.addEventListener("click", () => {
+            overlay.hidden = false;
+        });
+
+        overlay.querySelector(".rag-package-close")
+            ?.addEventListener("click", close);
+        overlay.addEventListener("click", (event) => {
+            if (event.target === overlay) close();
+        });
+        overlay.querySelector('[data-action="zip"]')
+            ?.addEventListener("click", () => zipInput.click());
+        overlay.querySelector('[data-action="folder"]')
+            ?.addEventListener("click", () => folderInput.click());
+
+        zipInput.addEventListener("change", () => {
+            const file = zipInput.files?.[0];
+            if (file) void run(file, file.name);
+        });
+
+        folderInput.addEventListener("change", () => {
+            const files = [...(folderInput.files || [])];
+            if (files.length) {
+                const name = files[0].webkitRelativePath?.split("/")[0] || "pasta";
+                void run(files, name);
+            }
+        });
     }
 
     // ============================================================
@@ -15963,6 +16876,144 @@
     font-weight: 900;
 }
 
+.rag-package-importer {
+    border: 1px solid rgba(255,255,255,.28);
+    background: linear-gradient(135deg,#176ea4,#7139bd) !important;
+    font: 900 18px/1.1 sans-serif !important;
+}
+
+.rag-package-overlay[hidden] {
+    display: none !important;
+}
+
+.rag-package-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 650000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    padding: 14px;
+    background: rgba(0,0,0,.86);
+    backdrop-filter: blur(5px);
+}
+
+.rag-package-card {
+    position: relative;
+    width: min(650px, calc(100vw - 28px));
+    max-height: calc(100vh - 28px);
+    overflow: auto;
+    box-sizing: border-box;
+    padding: 20px;
+    border: 2px solid #5ba7ff;
+    border-radius: 12px;
+    background: #222329;
+    color: white;
+    box-shadow: 0 18px 80px rgba(0,0,0,.65);
+    overscroll-behavior: contain;
+}
+
+.rag-package-card h2 {
+    margin: 0 34px 8px;
+    color: #dcb7ff;
+    text-align: center;
+    font: 900 20px/1.2 sans-serif;
+}
+
+.rag-package-card p {
+    margin: 0 0 12px;
+    color: #d0d0d5;
+    font: 650 12px/1.45 sans-serif;
+}
+
+.rag-package-card code {
+    color: #90dcff;
+}
+
+.rag-package-card pre {
+    overflow: auto;
+    margin: 0 0 13px;
+    padding: 11px;
+    border: 1px solid #4b4d56;
+    border-radius: 7px;
+    background: #15161a;
+    color: #bfe8ff;
+    font: 700 11px/1.45 monospace;
+}
+
+.rag-package-close {
+    position: absolute;
+    top: 8px;
+    right: 9px;
+    width: 36px;
+    height: 36px;
+    border: 0;
+    background: transparent;
+    color: #ddd;
+    font-size: 28px;
+    line-height: 1;
+}
+
+.rag-package-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 9px;
+}
+
+.rag-package-actions button {
+    min-height: 48px;
+    border: 1px solid #5ba7ff;
+    border-radius: 7px;
+    background: linear-gradient(135deg,#176ea4,#7139bd);
+    color: white;
+    font-weight: 900;
+}
+
+.rag-package-overlay button:disabled {
+    opacity: .48;
+}
+
+.rag-package-links {
+    display: flex;
+    justify-content: center;
+    gap: 16px;
+    margin: 13px 0 9px;
+}
+
+.rag-package-links a {
+    color: #a8deff;
+    font: 850 10px/1.2 sans-serif;
+}
+
+.rag-package-status {
+    display: block;
+    padding: 8px;
+    border-radius: 6px;
+    background: #17181d;
+    color: #aee4ff;
+    text-align: center;
+    font: 700 10px/1.35 monospace;
+}
+
+.rag-package-overlay[data-busy="true"] .rag-package-status {
+    color: #ffd479;
+}
+
+@media (max-width: 620px) {
+    .rag-package-card {
+        padding: 16px 12px;
+    }
+
+    .rag-package-actions {
+        grid-template-columns: 1fr;
+    }
+
+    .rag-package-card h2 {
+        font-size: 16px;
+    }
+}
+
 
 .gridable.rag-grid-visible {
     --rag-grid-line:
@@ -17371,6 +18422,7 @@
         // resize path used by imported and native textures alike.
         patchPanelLock(mods);
         await installHybridUpload();
+        await installCompleteUiImporter();
         observeProperties();
 
         console.log(`[RAG JSON UI] Patch ${BUILD} pronto.`);
