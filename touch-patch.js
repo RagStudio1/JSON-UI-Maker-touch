@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v44-panel-lock-spacing-size";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v45-responsive-panel-children";
 
-    const BUILD = "v44-panel-lock-spacing-size";
+    const BUILD = "v45-responsive-panel-children";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -4398,6 +4398,17 @@
         shared.__ragContainersV22 =
             true;
 
+        if (!mods.config.settings.resize_panel_children) {
+            mods.config.settings.resize_panel_children = {
+                type: "checkbox",
+                editable: true,
+                value: true,
+                displayName: "Resize Panel Children",
+            };
+        }
+
+        const responsiveResizeStates = new WeakMap();
+
         function isContainerElement(
             element
         ) {
@@ -4412,6 +4423,553 @@
                     "draggable-scrolling_panel"
                 )
             );
+        }
+
+        function cssNumber(
+            element,
+            property,
+            fallback = 0
+        ) {
+            const styled =
+                parseFloat(
+                    element?.style?.[
+                        property
+                    ]
+                );
+
+            if (Number.isFinite(styled)) {
+                return styled;
+            }
+
+            if (property === "left") {
+                return element?.offsetLeft || fallback;
+            }
+
+            if (property === "top") {
+                return element?.offsetTop || fallback;
+            }
+
+            if (property === "width") {
+                return (
+                    element?.offsetWidth ||
+                    element?.getBoundingClientRect?.().width ||
+                    fallback
+                );
+            }
+
+            if (property === "height") {
+                return (
+                    element?.offsetHeight ||
+                    element?.getBoundingClientRect?.().height ||
+                    fallback
+                );
+            }
+
+            return fallback;
+        }
+
+        function cssDimension(
+            value,
+            fallbackUnit = "px"
+        ) {
+            const source = String(value || "").trim();
+            const number = parseFloat(source);
+            const unit = source.match(/[a-z%]+$/i)?.[0] || fallbackUnit;
+
+            return {
+                value: Number.isFinite(number) ? number : 1,
+                unit,
+            };
+        }
+
+        function layoutPositionElement(
+            instance,
+            element
+        ) {
+            return instance?.basePanel instanceof HTMLElement
+                ? instance.basePanel
+                : element;
+        }
+
+        function captureResponsiveEntry(
+            instance
+        ) {
+            const element =
+                instance?.getMainHTMLElement?.();
+
+            if (
+                !(element instanceof HTMLElement) ||
+                !element.dataset.id
+            ) {
+                return null;
+            }
+
+            const positionElement =
+                layoutPositionElement(
+                    instance,
+                    element
+                );
+            const font = cssDimension(
+                element.style.fontSize,
+                "em"
+            );
+            const shadow =
+                instance.shadowLabel instanceof HTMLElement
+                    ? {
+                        left: cssNumber(
+                            instance.shadowLabel,
+                            "left"
+                        ),
+                        top: cssNumber(
+                            instance.shadowLabel,
+                            "top"
+                        ),
+                        width: cssNumber(
+                            instance.shadowLabel,
+                            "width"
+                        ),
+                        height: cssNumber(
+                            instance.shadowLabel,
+                            "height"
+                        ),
+                    }
+                    : null;
+            const isButton =
+                instance instanceof mods.DraggableButton;
+            const isCanvas =
+                instance instanceof mods.DraggableCanvas;
+            return {
+                id: element.dataset.id,
+                left: cssNumber(
+                    positionElement,
+                    "left"
+                ),
+                top: cssNumber(
+                    positionElement,
+                    "top"
+                ),
+                width: Math.max(
+                    1,
+                    cssNumber(
+                        element,
+                        "width",
+                        1
+                    )
+                ),
+                height: Math.max(
+                    1,
+                    cssNumber(
+                        element,
+                        "height",
+                        1
+                    )
+                ),
+                fontValue: font.value,
+                fontUnit: font.unit,
+                shadow,
+                preserveAspect:
+                    (
+                        isCanvas &&
+                        !instance.nineSlice &&
+                        element.dataset.ragKeepAspect !== "false"
+                    ),
+                centerButtonLabel:
+                    isButton &&
+                    buttonLabelIsCentered(instance),
+            };
+        }
+
+        function responsiveDescendants(
+            root
+        ) {
+            const result = [];
+
+            for (
+                const instance
+                of mods.index.GLOBAL_ELEMENT_MAP.values()
+            ) {
+                const element =
+                    instance?.getMainHTMLElement?.();
+
+                if (
+                    !(element instanceof HTMLElement) ||
+                    element === root ||
+                    !root.contains(element)
+                ) {
+                    continue;
+                }
+
+                const entry =
+                    captureResponsiveEntry(
+                        instance
+                    );
+
+                if (entry) result.push(entry);
+            }
+
+            return result;
+        }
+
+        function scaledResponsiveEntries(
+            entries,
+            scaleX,
+            scaleY
+        ) {
+            const uniform = Math.min(
+                scaleX,
+                scaleY
+            );
+
+            return entries.map((entry) => {
+                const widthScale =
+                    entry.preserveAspect
+                        ? uniform
+                        : scaleX;
+                const heightScale =
+                    entry.preserveAspect
+                        ? uniform
+                        : scaleY;
+
+                return {
+                    ...entry,
+                    left: entry.left * scaleX,
+                    top: entry.top * scaleY,
+                    width: Math.max(
+                        1,
+                        entry.width * widthScale
+                    ),
+                    height: Math.max(
+                        1,
+                        entry.height * heightScale
+                    ),
+                    fontValue:
+                        entry.fontValue * uniform,
+                    shadow: entry.shadow
+                        ? {
+                            left: entry.shadow.left * scaleX,
+                            top: entry.shadow.top * scaleY,
+                            width: entry.shadow.width * scaleX,
+                            height: entry.shadow.height * scaleY,
+                        }
+                        : null,
+                };
+            });
+        }
+
+        function applyResponsiveEntries(
+            entries,
+            final = false
+        ) {
+            const applied = [];
+
+            for (const entry of entries) {
+                const instance =
+                    mods.index.GLOBAL_ELEMENT_MAP.get(
+                        entry.id
+                    );
+                const element =
+                    instance?.getMainHTMLElement?.();
+
+                if (!(element instanceof HTMLElement)) {
+                    continue;
+                }
+
+                const positionElement =
+                    layoutPositionElement(
+                        instance,
+                        element
+                    );
+
+                positionElement.style.left =
+                    `${entry.left}px`;
+                positionElement.style.top =
+                    `${entry.top}px`;
+                positionElement.style.width =
+                    `${entry.width}px`;
+                positionElement.style.height =
+                    `${entry.height}px`;
+
+                element.style.width =
+                    `${entry.width}px`;
+                element.style.height =
+                    `${entry.height}px`;
+
+                if (instance.canvas instanceof HTMLCanvasElement) {
+                    instance.canvas.style.width =
+                        `${entry.width}px`;
+                    instance.canvas.style.height =
+                        `${entry.height}px`;
+                }
+
+                if (instance.label instanceof HTMLElement) {
+                    const fontSize =
+                        `${Math.max(0.05, entry.fontValue)}${entry.fontUnit}`;
+
+                    instance.label.style.fontSize = fontSize;
+                    instance.mirror.style.fontSize = fontSize;
+                    instance.shadowLabel.style.fontSize = fontSize;
+                    instance.lastAttemptedScaleFactor =
+                        String(entry.fontValue);
+
+                    if (entry.shadow) {
+                        instance.shadowLabel.style.left =
+                            `${entry.shadow.left}px`;
+                        instance.shadowLabel.style.top =
+                            `${entry.shadow.top}px`;
+                        instance.shadowLabel.style.width =
+                            `${entry.shadow.width}px`;
+                        instance.shadowLabel.style.height =
+                            `${entry.shadow.height}px`;
+                    }
+                }
+
+                if (
+                    instance.centerCircle instanceof HTMLElement
+                ) {
+                    shared.updateCenterCirclePosition?.(
+                        instance
+                    );
+                }
+                instance.slider?.updateHandle?.();
+
+                applied.push({
+                    entry,
+                    instance,
+                    element,
+                });
+            }
+
+            if (!final) return;
+
+            for (const item of applied) {
+                const { entry, instance } = item;
+
+                if (instance instanceof mods.DraggableButton) {
+                    instance.drawImage(
+                        entry.width,
+                        entry.height,
+                        instance.getCurrentlyRenderedState?.()
+                    );
+                } else if (instance instanceof mods.DraggableCanvas) {
+                    instance.drawImage(
+                        entry.width,
+                        entry.height,
+                        false
+                    );
+                }
+            }
+
+            for (const item of applied) {
+                const { entry, instance } = item;
+
+                if (instance.label instanceof HTMLElement) {
+                    instance.updateSize?.(false);
+                }
+
+                if (
+                    entry.centerButtonLabel &&
+                    instance instanceof mods.DraggableButton
+                ) {
+                    centerButtonLabel(instance);
+                }
+            }
+        }
+
+        function shouldScaleChildren(
+            classElement
+        ) {
+            const element =
+                classElement?.getMainHTMLElement?.();
+
+            return Boolean(
+                isContainerElement(element) &&
+                mods.config.settings.resize_panel_children?.value !== false &&
+                element.dataset.ragScaleChildren !== "false"
+            );
+        }
+
+        function beginResponsiveResize(
+            classElement
+        ) {
+            if (!shouldScaleChildren(classElement)) return;
+
+            const root =
+                classElement.getMainHTMLElement();
+
+            if (
+                root.dataset.ragScaleChildren === undefined
+            ) {
+                root.dataset.ragScaleChildren = "true";
+            }
+
+            const entries =
+                responsiveDescendants(root);
+
+            if (!entries.length) return;
+
+            responsiveResizeStates.set(
+                classElement,
+                {
+                    root,
+                    startWidth: Math.max(
+                        1,
+                        cssNumber(root, "width", 1)
+                    ),
+                    startHeight: Math.max(
+                        1,
+                        cssNumber(root, "height", 1)
+                    ),
+                    initialEntries: entries,
+                    latestEntries: entries,
+                }
+            );
+        }
+
+        function syncResponsiveResize(
+            classElement,
+            final = false
+        ) {
+            const state =
+                responsiveResizeStates.get(
+                    classElement
+                );
+
+            if (!state) return null;
+
+            const width = Math.max(
+                1,
+                cssNumber(
+                    state.root,
+                    "width",
+                    state.startWidth
+                )
+            );
+            const height = Math.max(
+                1,
+                cssNumber(
+                    state.root,
+                    "height",
+                    state.startHeight
+                )
+            );
+            const scaleX = width / state.startWidth;
+            const scaleY = height / state.startHeight;
+            const entries =
+                scaledResponsiveEntries(
+                    state.initialEntries,
+                    scaleX,
+                    scaleY
+                );
+
+            state.latestEntries = entries;
+            applyResponsiveEntries(
+                entries,
+                final
+            );
+
+            return state;
+        }
+
+        function finishResponsiveResize(
+            classElement
+        ) {
+            const state =
+                syncResponsiveResize(
+                    classElement,
+                    true
+                );
+
+            if (!state) return null;
+
+            responsiveResizeStates.delete(
+                classElement
+            );
+
+            return {
+                rootId:
+                    state.root.dataset.id,
+                previous:
+                    state.initialEntries,
+                next:
+                    state.latestEntries,
+            };
+        }
+
+        function attachResponsiveUndo(
+            resizeLayout,
+            previousLastOperation
+        ) {
+            if (!resizeLayout) return;
+
+            const stack =
+                mods.undoRedoManager?.undoStack;
+            const operation =
+                Array.isArray(stack)
+                    ? stack[stack.length - 1]
+                    : null;
+
+            if (
+                Array.isArray(stack) &&
+                operation !== previousLastOperation &&
+                operation?.type === "resize" &&
+                operation.elementId === resizeLayout.rootId
+            ) {
+                operation.ragResponsiveChildren = {
+                    previous: resizeLayout.previous,
+                    next: resizeLayout.next,
+                };
+            }
+        }
+
+        function patchResponsiveUndo() {
+            const manager =
+                mods.undoRedoManager;
+
+            if (
+                !manager ||
+                manager.__ragResponsiveResizeV45
+            ) {
+                return;
+            }
+
+            manager.__ragResponsiveResizeV45 = true;
+
+            const originalPerform =
+                manager.performOperation.bind(
+                    manager
+                );
+            const originalReverse =
+                manager.performReverseOperation.bind(
+                    manager
+                );
+
+            manager.performOperation = function (operation) {
+                const result =
+                    originalPerform(operation);
+
+                if (operation?.ragResponsiveChildren?.next) {
+                    applyResponsiveEntries(
+                        operation.ragResponsiveChildren.next,
+                        true
+                    );
+                }
+
+                return result;
+            };
+
+            manager.performReverseOperation = function (operation) {
+                const result =
+                    originalReverse(operation);
+
+                if (operation?.ragResponsiveChildren?.previous) {
+                    applyResponsiveEntries(
+                        operation.ragResponsiveChildren.previous,
+                        true
+                    );
+                }
+
+                return result;
+            };
         }
 
         function enableDefaultClipping(
@@ -4445,6 +5003,16 @@
             ) {
                 element.dataset
                     .ragClipsChildren =
+                    "true";
+            }
+
+            if (
+                element.dataset
+                    .ragScaleChildren ===
+                undefined
+            ) {
+                element.dataset
+                    .ragScaleChildren =
                     "true";
             }
 
@@ -4651,6 +5219,29 @@
         const originalDrag =
             shared.drag;
 
+        const originalStartResize =
+            shared.startResize;
+
+        shared.startResize = function (
+            event,
+            classElement,
+            ...args
+        ) {
+            const result =
+                originalStartResize.call(
+                    this,
+                    event,
+                    classElement,
+                    ...args
+                );
+
+            beginResponsiveResize(
+                classElement
+            );
+
+            return result;
+        };
+
         shared.drag = function (
             event,
             classElement,
@@ -4758,8 +5349,46 @@
                     `${height}px`;
             }
 
+            syncResponsiveResize(
+                classElement
+            );
+
             return result;
         };
+
+        const originalStopResize =
+            shared.stopResize;
+
+        shared.stopResize = function (
+            classElement,
+            ...args
+        ) {
+            const undoStack =
+                mods.undoRedoManager?.undoStack;
+            const previousLastOperation =
+                Array.isArray(undoStack)
+                    ? undoStack[undoStack.length - 1]
+                    : null;
+            const resizeLayout =
+                finishResponsiveResize(
+                    classElement
+                );
+            const result =
+                originalStopResize.call(
+                    this,
+                    classElement,
+                    ...args
+                );
+
+            attachResponsiveUndo(
+                resizeLayout,
+                previousLastOperation
+            );
+
+            return result;
+        };
+
+        patchResponsiveUndo();
 
         for (
             const instance
@@ -4777,6 +5406,8 @@
                 enableDefaultClipping,
             clamp:
                 clampChild,
+            syncResize:
+                syncResponsiveResize,
         };
     }
 
@@ -5544,6 +6175,13 @@
                 ...args
             );
             applyResizeSnap(event, classElement);
+            // Panel Lock may change the parent size after the responsive
+            // container wrapper already ran. Re-sync children to the snapped
+            // dimensions so they never end one frame behind the panel.
+            window.__RAG_CONTAINER_V22__
+                ?.syncResize?.(
+                    classElement
+                );
             return result;
         };
 
@@ -14418,9 +15056,60 @@
                     }
                 );
 
+                if (
+                    panelElement.dataset
+                        .ragScaleChildren ===
+                    undefined
+                ) {
+                    panelElement.dataset
+                        .ragScaleChildren =
+                        "true";
+                }
+
+                const scaleChildren =
+                    document.createElement(
+                        "button"
+                    );
+
+                scaleChildren.type = "button";
+                scaleChildren.className =
+                    "propertyInputButton";
+
+                const renderScaleChildren =
+                    () => {
+                        const enabled =
+                            panelElement.dataset
+                                .ragScaleChildren !==
+                            "false";
+
+                        scaleChildren.textContent =
+                            enabled
+                                ? "REDIMENSIONAR FILHOS: SIM"
+                                : "REDIMENSIONAR FILHOS: NAO";
+                    };
+
+                renderScaleChildren();
+
+                scaleChildren.addEventListener(
+                    "click",
+                    () => {
+                        const enabled =
+                            panelElement.dataset
+                                .ragScaleChildren !==
+                            "false";
+
+                        panelElement.dataset
+                            .ragScaleChildren =
+                            String(!enabled);
+
+                        renderScaleChildren();
+                    }
+                );
+
                 panelBox.append(
                     title,
-                    clip
+                    clip,
+                    scaleChildren
                 );
 
                 if (

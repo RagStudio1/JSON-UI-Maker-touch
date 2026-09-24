@@ -1,5 +1,15 @@
-JSON-UI-Maker Patch v44
-Build: v44-panel-lock-spacing-size
+JSON-UI-Maker Patch v45
+Build: v45-responsive-panel-children
+
+REDIMENSIONAMENTO RESPONSIVO DE PAINEL:
+- ao aumentar ou diminuir um painel, filhos acompanham a nova largura e altura
+- posicoes, paineis aninhados, botoes, imagens e textos escalam juntos
+- imagens com proporcao bloqueada preservam o aspecto e continuam dentro do pai
+- texturas de canvas e 9-slice sao redesenhadas ao terminar o gesto
+- Panel Lock recalcula os filhos depois de encaixar o tamanho do painel
+- desfazer e refazer restauram painel e todos os descendentes na mesma operacao
+- opcao global Resize Panel Children vem ativada por padrao
+- cada painel possui REDIMENSIONAR FILHOS: SIM/NAO nas propriedades
 
 PANEL LOCK COM ALINHAMENTO INTELIGENTE:
 - mostra guias nomeadas para bordas, centros, topos, meios e bases
