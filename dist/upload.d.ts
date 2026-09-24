@@ -12,6 +12,7 @@ export declare class FormUploader {
         control: StringObjectMap;
         type: string;
     }[];
+    static findScrollingLinkerPanel(json: StringObjectMap | undefined): StringObjectMap | undefined;
     static uploadForm(form: string): void;
     static tree(rootJson: StringObjectMap, parentClassElement: GlobalElementMapValue, args?: any): void;
 }

@@ -23,9 +23,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v50-visual-viewport-actions";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v51-scroll-panel-roundtrip";
 
-    const BUILD = "v50-visual-viewport-actions";
+    const BUILD = "v51-scroll-panel-roundtrip";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -9069,6 +9069,87 @@
 
         if (creators && !creators.__ragRoundTripV31) {
             creators.__ragRoundTripV31 = true;
+
+            // Compatibility for a cached pre-v51 upload module. The old
+            // scrolling-panel creator searched the parent's first child for
+            // its content linker. Feed it the linker from the current scroll
+            // node so non-first scroll panels also restore their children.
+            if (
+                typeof mods.FormUploader.findScrollingLinkerPanel !==
+                "function"
+            ) {
+                const oldScrollingCreator = creators.get("scrolling_panel");
+
+                if (oldScrollingCreator) {
+                    creators.set(
+                        "scrolling_panel",
+                        (json, parent, usedConfig, nextNodes) => {
+                            const pending = [json];
+                            const visited = new Set();
+                            let linker = null;
+
+                            while (pending.length && !linker) {
+                                const current = pending.shift();
+                                if (
+                                    !current ||
+                                    typeof current !== "object" ||
+                                    visited.has(current)
+                                ) {
+                                    continue;
+                                }
+
+                                visited.add(current);
+
+                                if (
+                                    typeof current.$scrolling_content ===
+                                    "string"
+                                ) {
+                                    linker = current;
+                                    break;
+                                }
+
+                                if (!Array.isArray(current.controls)) continue;
+
+                                for (const control of current.controls) {
+                                    if (!control || typeof control !== "object") {
+                                        continue;
+                                    }
+
+                                    for (const child of Object.values(control)) {
+                                        if (child && typeof child === "object") {
+                                            pending.push(child);
+                                        }
+                                    }
+                                }
+                            }
+
+                            const compatibleParent = linker
+                                ? {
+                                    controls: [
+                                        {
+                                            "rag-scroll-node": {
+                                                controls: [
+                                                    {
+                                                        "rag-scroll-linker":
+                                                            linker,
+                                                    },
+                                                ],
+                                            },
+                                        },
+                                    ],
+                                }
+                                : nextNodes;
+
+                            return oldScrollingCreator(
+                                json,
+                                parent,
+                                usedConfig,
+                                compatibleParent
+                            );
+                        }
+                    );
+                }
+            }
 
             for (const [type, original] of [...creators.entries()]) {
                 creators.set(type, (...args) => {

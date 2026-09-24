@@ -71,6 +71,37 @@ export class FormUploader {
         return jsonControls;
     }
 
+    public static findScrollingLinkerPanel(json: StringObjectMap | undefined): StringObjectMap | undefined {
+        if (!json || typeof json !== "object") return undefined;
+
+        const pending: object[] = [json];
+        const visited = new Set<object>();
+
+        while (pending.length > 0) {
+            const current = pending.shift();
+            if (!current || visited.has(current)) continue;
+            visited.add(current);
+
+            const record = current as Record<string, unknown>;
+            if (typeof record.$scrolling_content === "string") {
+                return current as StringObjectMap;
+            }
+
+            const controls = record.controls;
+            if (!Array.isArray(controls)) continue;
+
+            for (const control of controls) {
+                if (!control || typeof control !== "object") continue;
+
+                for (const child of Object.values(control as Record<string, unknown>)) {
+                    if (child && typeof child === "object") pending.push(child);
+                }
+            }
+        }
+
+        return undefined;
+    }
+
     public static uploadForm(form: string) {
         if (FormUploader.isValid(form)) {
             const parsed = FormUploader.parseJsonWithComments(form);
@@ -354,12 +385,21 @@ export const tagNameToCreateClassElementFunc: Map<
 
             GLOBAL_ELEMENT_MAP.set(id, scrollingPanel);
 
-            // Iterate twice to get to the from the current node to the node ahead
-            const controls1 = FormUploader.getJsonControlsAndType(nextNodes!);
-            const scrollingLinkerPanel = FormUploader.getJsonControlsAndType(controls1[0]?.control!)[0]?.control!;
+            // The linker belongs to this scrolling panel. Looking it up from
+            // nextNodes used to select the parent's first child, so scroll
+            // panels that were not the first sibling lost all their content
+            // during a save/import round trip.
+            const scrollingLinkerPanel =
+                FormUploader.findScrollingLinkerPanel(json) ??
+                FormUploader.findScrollingLinkerPanel(nextNodes);
 
-            const size = json.size as [number, number];
-            const offset = scrollingLinkerPanel.$scrolling_pane_offset as [number, number];
+            if (!scrollingLinkerPanel) {
+                new Notification("Scrolling panel content link not found", 5000, "error");
+                return { element: scrollingPanel, instructions: { ContinuePath: false } };
+            }
+
+            const size = (json.size ?? scrollingLinkerPanel.$scrolling_pane_size) as [number, number];
+            const offset = (scrollingLinkerPanel.$scrolling_pane_offset ?? json.offset ?? [0, 0]) as [number, number];
 
             scrollingPanel.panel.style.width = `${size[0] / UI_SCALAR}px`;
             scrollingPanel.panel.style.height = `${size[1] / UI_SCALAR}px`;
@@ -373,7 +413,7 @@ export const tagNameToCreateClassElementFunc: Map<
 
             scrollingPanel.panel.style.zIndex = `${json.layer}`;
 
-            if ((scrollingLinkerPanel.bindings as []).length > 0)
+            if (Array.isArray(scrollingLinkerPanel.bindings) && scrollingLinkerPanel.bindings.length > 0)
                 scrollingPanel.bindings = JSON.stringify(scrollingLinkerPanel.bindings, null, config.magicNumbers.textEditor.indentation);
 
             return { element: scrollingPanel, instructions: { ContinuePath: true, FollowPath: scrollingLinkerPanel.$scrolling_content as string } };
