@@ -1,16 +1,29 @@
-JSON-UI-Maker Patch v26
-Build: v26-builtin-nordic-assets
+JSON-UI-Maker Patch v27
+Build: v27-layer-editor-fix
 
-BUILT-IN NORDIC ASSETS:
-- ui/nordic/button/title/lime.png + .json
-- ui/nordic/form/border.png + .json
-- ui/nordic/form/backgrounds/lime.png
-- ui/nordic/common/border.png + .json
+LAYER ORDER CORRIGIDA:
+- BACKGROUND: z-index 10, EDITAVEL
+- CONTENT SLOT: z-index 20
+- BORDER: z-index 60, FIXO
+- HEADER: z-index 120, EDITAVEL
 
-Esses assets foram extraidos do NORDIC_COSMETICS_RP_v4.9.14 fornecido pelo usuario.
-Eles sao registrados automaticamente em images + GLOBAL_FILE_SYSTEM.
-Aparecem no Choose Image e na busca sem importar a pasta ui.
-Assets reais importados pelo usuario continuam tendo prioridade sobre os built-ins.
+BACKGROUND:
+- nao e mais ragFixedDecorative
+- pointer/touch ativo
+- resize handle ativo
+- pode mover e redimensionar normalmente
+- auto-fit acontece apenas UMA vez na criacao
+- depois o sistema nao sobrescreve posicao/tamanho do usuario
+- botao AJUSTAR AO CONTENT SLOT nas propriedades
 
-Border System Auto agora funciona imediatamente com os assets Nordic embutidos.
-Mantem V25 Border System, copy/paste corrigido e controles adicionais.
+EXPLORER:
+- elementos especiais ganham nomes reais:
+  BACKGROUND
+  BORDER
+  HEADER
+  HEADER TEXTURE
+  CONTENT SLOT
+- header aparece explicitamente na lista
+
+Mantem V26 assets Nordic built-in, V25 Border System, V24 copy/paste fix,
+Text Field/Dropdown/Toggle/Slider, clipping, touch, grid e sidecar nativo.

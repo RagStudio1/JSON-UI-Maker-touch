@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v26-builtin-nordic-assets";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v27-layer-editor-fix";
 
-    const BUILD = "v26-builtin-nordic-assets";
+    const BUILD = "v27-layer-editor-fix";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -147,6 +147,7 @@
             import("./dist/elements/sharedElement.js"),
             import("./dist/copy_paste/copy.js"),
             import("./dist/copy_paste/paste.js"),
+            import("./dist/ui/explorer/explorerController.js"),
         ]).then(([
             index,
             configMod,
@@ -163,6 +164,7 @@
             sharedMod,
             copyMod,
             pasteMod,
+            explorerMod,
         ]) => ({
             index,
             config: configMod.config,
@@ -182,6 +184,7 @@
             copyConversionMap: copyMod.conversionMap,
             Paster: pasteMod.Paster,
             pasteConversionMap: pasteMod.pasteConversionMap,
+            ExplorerController: explorerMod.ExplorerController,
         }));
 
         return modulesPromise;
@@ -3806,9 +3809,16 @@
         host.dataset.ragHeader =
             "true";
 
+        host.dataset.ragExplorerName =
+            "HEADER";
+
         host.classList.add(
             "rag-header-panel"
         );
+
+        // Header must always render ABOVE the border.
+        host.style.zIndex =
+            "120";
 
         host.style.width =
             `${Math.max(
@@ -3889,6 +3899,11 @@
             .dataset
             .ragHeaderBackground =
             "true";
+
+        background.canvasHolder
+            .dataset
+            .ragExplorerName =
+            "HEADER TEXTURE";
 
         background.canvasHolder
             .dataset
@@ -7018,6 +7033,13 @@
             .ragBorderSystemRole =
             role;
 
+        if (role === "border") {
+            canvas.canvasHolder
+                .dataset
+                .ragExplorerName =
+                "BORDER";
+        }
+
         canvas.canvasHolder
             .dataset
             .ragFixedDecorative =
@@ -7163,6 +7185,10 @@
                 "true";
 
             slot.panel.dataset
+                .ragExplorerName =
+                "CONTENT SLOT";
+
+            slot.panel.dataset
                 .ragClipsChildren =
                 "true";
 
@@ -7188,20 +7214,84 @@
                 "background"
             )
         ) {
-            const bg =
-                await createBorderSystemCanvas(
-                    slotHost,
-                    backgroundPath,
-                    "background",
+            const state =
+                realImageState(
                     mods,
-                    0
-                );
+                    backgroundPath
+                )?.state;
 
-            if (bg) {
+            if (state?.png) {
+                const bgId =
+                    crypto.randomUUID?.()
+                        ?.replace(/-/g, "")
+                        .slice(0, 15) ||
+                    Math.random()
+                        .toString(36)
+                        .slice(2, 17);
+
+                const bg =
+                    new mods.DraggableCanvas(
+                        bgId,
+                        slotHost,
+                        state.png,
+                        normalizeTexture(
+                            backgroundPath
+                        ),
+                        state.json
+                    );
+
+                mods.index
+                    .GLOBAL_ELEMENT_MAP
+                    .set(
+                        bgId,
+                        bg
+                    );
+
+                // IMPORTANT V27:
+                // Background is a NORMAL editable image.
+                // Do NOT mark it ragFixedDecorative.
+                bg.canvasHolder
+                    .dataset
+                    .ragBorderSystemRole =
+                    "background";
+
                 bg.canvasHolder
                     .dataset
                     .ragBorderBackground =
                     "true";
+
+                bg.canvasHolder
+                    .dataset
+                    .ragExplorerName =
+                    "BACKGROUND";
+
+                bg.canvasHolder
+                    .dataset
+                    .ragKeepAspect =
+                    "false";
+
+                bg.canvasHolder
+                    .style.pointerEvents =
+                    "auto";
+
+                bg.canvasHolder
+                    .style.zIndex =
+                    "10";
+
+                bg.gridElement
+                    .style.pointerEvents =
+                    "auto";
+
+                bg.resizeHandle
+                    .style.display =
+                    "block";
+
+                // It will be fitted once after the content slot gets
+                // its final size. After that the user owns position/size.
+                bg.canvasHolder
+                    .dataset
+                    .ragBackgroundInitialized =
+                    "false";
             }
         }
 
@@ -7253,6 +7343,10 @@
             ) ||
             rect.height ||
             1;
+
+        border.canvasHolder
+            .style.zIndex =
+            "60";
 
         sizeBorderCanvas(
             border,
@@ -7361,8 +7455,14 @@
                 );
 
             if (
-                background
+                background &&
+                background.canvasHolder
+                    .dataset
+                    .ragBackgroundInitialized !==
+                    "true"
             ) {
+                // Initial fit only.
+                // After this the user is free to move/resize it.
                 sizeBorderCanvas(
                     background,
                     0,
@@ -7376,6 +7476,11 @@
                             .style.height
                     ) || 1
                 );
+
+                background.canvasHolder
+                    .dataset
+                    .ragBackgroundInitialized =
+                    "true";
             }
         }
 
@@ -7399,6 +7504,11 @@
                 headerMainElement(
                     header
                 );
+
+            if (headerHost) {
+                headerHost.style.zIndex =
+                    "120";
+            }
 
             if (
                 headerHost &&
@@ -7688,6 +7798,16 @@
                     .dataset.ragBorderHeader =
                     "true";
 
+                header
+                    .getMainHTMLElement()
+                    .dataset.ragExplorerName =
+                    "HEADER";
+
+                header
+                    .getMainHTMLElement()
+                    .style.zIndex =
+                    "120";
+
                 const originalStartDrag =
                     header.startDrag
                         .bind(
@@ -7765,6 +7885,225 @@
         ensureBorderSystemObserver(
             mods
         );
+    }
+
+    function patchExplorerNames(
+        mods
+    ) {
+        const Explorer =
+            mods.ExplorerController;
+
+        if (
+            !Explorer ||
+            Explorer.__ragNamesV27
+        ) {
+            return;
+        }
+
+        Explorer.__ragNamesV27 =
+            true;
+
+        const originalUpdate =
+            Explorer.updateExplorer
+                .bind(
+                    Explorer
+                );
+
+        function elementLabel(
+            element
+        ) {
+            if (
+                element?.dataset
+                    ?.ragExplorerName
+            ) {
+                return element.dataset
+                    .ragExplorerName;
+            }
+
+            if (
+                element?.dataset
+                    ?.ragBorderBackground ===
+                "true"
+            ) {
+                return "BACKGROUND";
+            }
+
+            if (
+                element?.dataset
+                    ?.ragBorderSystemRole ===
+                "border"
+            ) {
+                return "BORDER";
+            }
+
+            if (
+                element?.dataset
+                    ?.ragHeader ===
+                "true"
+            ) {
+                return "HEADER";
+            }
+
+            if (
+                element?.dataset
+                    ?.ragBorderContentSlot ===
+                "true"
+            ) {
+                return "CONTENT SLOT";
+            }
+
+            return null;
+        }
+
+        function sourceChildren(
+            source
+        ) {
+            const result = [];
+
+            for (
+                const child
+                of source.children
+            ) {
+                const target =
+                    child.dataset
+                        ?.skip ===
+                        "true"
+                        ? child.firstChild
+                        : child;
+
+                if (
+                    target instanceof
+                        HTMLElement &&
+                    target.dataset?.id
+                ) {
+                    result.push(
+                        target
+                    );
+                }
+            }
+
+            return result;
+        }
+
+        function explorerChildren(
+            node
+        ) {
+            return [
+                ...node.children,
+            ].filter(
+                (child) =>
+                    child instanceof
+                        HTMLElement &&
+                    child.classList
+                        .contains(
+                            "explorerDiv"
+                        )
+            );
+        }
+
+        function decorate(
+            source,
+            explorerNode
+        ) {
+            const label =
+                elementLabel(
+                    source
+                );
+
+            if (label) {
+                const text =
+                    [
+                        ...explorerNode
+                            .children,
+                    ].find(
+                        (child) =>
+                            child.classList
+                                ?.contains(
+                                    "explorerText"
+                                )
+                    );
+
+                if (text) {
+                    text.textContent =
+                        label;
+                }
+            }
+
+            const sChildren =
+                sourceChildren(
+                    source
+                );
+
+            const eChildren =
+                explorerChildren(
+                    explorerNode
+                );
+
+            const count =
+                Math.min(
+                    sChildren.length,
+                    eChildren.length
+                );
+
+            for (
+                let i = 0;
+                i < count;
+                i++
+            ) {
+                decorate(
+                    sChildren[i],
+                    eChildren[i]
+                );
+            }
+        }
+
+        Explorer.updateExplorer =
+            function (...args) {
+                const result =
+                    originalUpdate(
+                        ...args
+                    );
+
+                const root =
+                    mods.config
+                        .rootElement;
+
+                const explorer =
+                    document.getElementById(
+                        "explorer"
+                    );
+
+                const rootNode =
+                    explorer
+                        ? [
+                            ...explorer
+                                .children,
+                        ].find(
+                            (child) =>
+                                child instanceof
+                                    HTMLElement &&
+                                child.classList
+                                    .contains(
+                                        "explorerDiv"
+                                    )
+                        )
+                        : null;
+
+                if (
+                    root &&
+                    rootNode
+                ) {
+                    decorate(
+                        root,
+                        rootNode
+                    );
+                }
+
+                return result;
+            };
+
+        // Rebuild once so existing auto-system objects get names immediately.
+        Explorer.updateExplorer();
     }
 
     function installExpandedSidebar(
@@ -9684,6 +10023,85 @@
                 mods
             );
 
+        if (
+            instance.canvasHolder
+                .dataset
+                .ragBorderBackground ===
+            "true"
+        ) {
+            const backgroundTitle =
+                document.createElement(
+                    "div"
+                );
+
+            backgroundTitle.className =
+                "rag-control-tools-title";
+
+            backgroundTitle.textContent =
+                "BACKGROUND EDITAVEL";
+
+            const fitSlot =
+                document.createElement(
+                    "button"
+                );
+
+            fitSlot.type =
+                "button";
+
+            fitSlot.className =
+                "propertyInputButton";
+
+            fitSlot.textContent =
+                "AJUSTAR AO CONTENT SLOT";
+
+            fitSlot.addEventListener(
+                "click",
+                () => {
+                    const rect =
+                        instance.container
+                            .getBoundingClientRect();
+
+                    instance.canvasHolder
+                        .style.left =
+                        "0px";
+
+                    instance.canvasHolder
+                        .style.top =
+                        "0px";
+
+                    instance.drawImage(
+                        rect.width,
+                        rect.height,
+                        false
+                    );
+
+                    instance.canvasHolder
+                        .dataset
+                        .ragBackgroundInitialized =
+                        "true";
+
+                    mods.updatePropertiesArea();
+                }
+            );
+
+            const info =
+                document.createElement(
+                    "div"
+                );
+
+            info.className =
+                "rag-panel-tools-hint";
+
+            info.textContent =
+                "BACKGROUND = camada 10. Pode mover e redimensionar livremente dentro do Content Slot.";
+
+            box.append(
+                backgroundTitle,
+                fitSlot,
+                info
+            );
+        }
+
         if (parentHeader) {
             const backHeader =
                 document.createElement(
@@ -10218,6 +10636,23 @@
 
 
 
+
+[data-rag-border-background="true"] {
+    pointer-events: auto !important;
+}
+
+[data-rag-border-background="true"] > .resize-handle {
+    display: block !important;
+}
+
+[data-rag-border-system-role="border"] {
+    pointer-events: none !important;
+}
+
+[data-rag-header="true"] {
+    z-index: 120 !important;
+}
+
 [data-rag-border-content-slot="true"] {
     background: rgba(0,0,0,.03);
     outline-style: dashed !important;
@@ -10517,6 +10952,7 @@
         patchNestedPanelDrag(mods);
         patchCopyPasteMetadata(mods);
         patchCopyPasteAutoChrome(mods);
+        patchExplorerNames(mods);
 
         installCopyPasteButtons(mods);
         installExpandedSidebar(mods);
