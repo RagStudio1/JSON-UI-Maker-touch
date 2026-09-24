@@ -1,0 +1,12 @@
+{
+  "nineslice_size": [
+    25, // right column
+    29, // top row
+    25, // left column
+    9 // bottom row
+  ],
+  "base_size": [
+    50, // width
+    44 // height
+  ]
+}
