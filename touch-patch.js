@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v43-safe-rebuild-background-delete";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v44-panel-lock-spacing-size";
 
-    const BUILD = "v43-safe-rebuild-background-delete";
+    const BUILD = "v44-panel-lock-spacing-size";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -4782,20 +4782,24 @@
 
     // Smart alignment between elements that share the same parent panel.
     // This is deliberately separate from Grid Lock: Grid Lock snaps to fixed
-    // cells, while Panel Lock snaps to sibling and parent edges/centers.
+    // cells, while Panel Lock snaps to sibling/parent edges, repeated gaps and
+    // matching sizes.
     function patchPanelLock(mods) {
         const shared = mods.ElementSharedFuncs;
 
-        if (!shared || shared.__ragPanelLockV30) return;
-        shared.__ragPanelLockV30 = true;
+        if (!shared || shared.__ragPanelLockV44) return;
+        shared.__ragPanelLockV44 = true;
 
         if (!mods.config.settings.panel_lock) {
             mods.config.settings.panel_lock = {
                 type: "checkbox",
                 editable: true,
                 value: false,
-                displayName: "Panel Lock (Smart Align)",
+                displayName: "Panel Lock (Align + Snap)",
             };
+        } else {
+            mods.config.settings.panel_lock.displayName =
+                "Panel Lock (Align + Snap)";
         }
 
         if (!mods.config.settings.panel_lock_radius) {
@@ -4807,7 +4811,27 @@
             };
         }
 
+        if (!mods.config.settings.panel_lock_spacing) {
+            mods.config.settings.panel_lock_spacing = {
+                type: "checkbox",
+                editable: true,
+                value: true,
+                displayName: "Panel Lock - Equal Spacing",
+            };
+        }
+
+        if (!mods.config.settings.panel_lock_resize) {
+            mods.config.settings.panel_lock_resize = {
+                type: "checkbox",
+                editable: true,
+                value: true,
+                displayName: "Panel Lock - Match Size",
+            };
+        }
+
         const activeGuides = [];
+        const sizePulseTimers = new WeakMap();
+        const sizeMatchKeys = new WeakMap();
 
         const clearGuides = () => {
             while (activeGuides.length) {
@@ -4815,7 +4839,7 @@
             }
         };
 
-        const addGuide = (parent, axis, position) => {
+        const addGuide = (parent, axis, position, label = "ALINHADO") => {
             const guide = document.createElement("div");
             guide.className = `rag-panel-lock-guide rag-panel-lock-${axis}`;
             guide.dataset.axis = axis.toUpperCase();
@@ -4826,8 +4850,200 @@
                 guide.style.top = `${position}px`;
             }
 
+            const badge = document.createElement("span");
+            badge.className = "rag-panel-lock-badge";
+            badge.textContent = label;
+            guide.appendChild(badge);
+
             parent.appendChild(guide);
             activeGuides.push(guide);
+        };
+
+        const addGapGuide = (parent, axis, segments, cross, label) => {
+            segments.forEach(([start, end], segmentIndex) => {
+                const guide = document.createElement("div");
+                const min = Math.min(start, end);
+                const length = Math.abs(end - start);
+
+                guide.className =
+                    `rag-panel-lock-gap rag-panel-lock-gap-${axis}`;
+
+                if (axis === "x") {
+                    guide.style.left = `${min}px`;
+                    guide.style.top = `${cross}px`;
+                    guide.style.width = `${Math.max(2, length)}px`;
+                } else {
+                    guide.style.left = `${cross}px`;
+                    guide.style.top = `${min}px`;
+                    guide.style.height = `${Math.max(2, length)}px`;
+                }
+
+                if (segmentIndex === 0) {
+                    const badge = document.createElement("span");
+                    badge.className = "rag-panel-lock-gap-label";
+                    badge.textContent = label;
+                    guide.appendChild(badge);
+                }
+
+                parent.appendChild(guide);
+                activeGuides.push(guide);
+            });
+        };
+
+        const addSizeBox = (parent, geometry, className = "") => {
+            const box = document.createElement("div");
+            box.className = `rag-panel-lock-size-box ${className}`.trim();
+            box.style.left = `${geometry.left}px`;
+            box.style.top = `${geometry.top}px`;
+            box.style.width = `${Math.max(1, geometry.width)}px`;
+            box.style.height = `${Math.max(1, geometry.height)}px`;
+            parent.appendChild(box);
+            activeGuides.push(box);
+        };
+
+        const addSizeGuides = (
+            parent,
+            geometry,
+            width,
+            height,
+            widthMatch,
+            heightMatch
+        ) => {
+            const targets = new Set(
+                [widthMatch?.record, heightMatch?.record].filter(Boolean)
+            );
+
+            for (const target of targets) {
+                addSizeBox(parent, target, "rag-panel-lock-size-reference");
+            }
+
+            addSizeBox(
+                parent,
+                { ...geometry, width, height },
+                "rag-panel-lock-size-current"
+            );
+
+            const badge = document.createElement("div");
+            badge.className = "rag-panel-lock-size-label";
+
+            if (widthMatch && heightMatch) {
+                badge.textContent =
+                    `MESMO TAMANHO ${Math.round(width)} x ${Math.round(height)} px`;
+            } else if (widthMatch) {
+                badge.textContent = `MESMA LARGURA ${Math.round(width)} px`;
+            } else {
+                badge.textContent = `MESMA ALTURA ${Math.round(height)} px`;
+            }
+
+            badge.style.left = `${geometry.left + width / 2}px`;
+            badge.style.top = `${Math.max(0, geometry.top - 10)}px`;
+            parent.appendChild(badge);
+            activeGuides.push(badge);
+        };
+
+        const pulseSizeMatch = (element, key) => {
+            if (sizeMatchKeys.get(element) === key) return;
+
+            sizeMatchKeys.set(element, key);
+            element.classList.remove("rag-panel-lock-size-snapped");
+            void element.offsetWidth;
+            element.classList.add("rag-panel-lock-size-snapped");
+
+            const previous = sizePulseTimers.get(element);
+            if (previous) clearTimeout(previous);
+
+            sizePulseTimers.set(
+                element,
+                setTimeout(() => {
+                    element.classList.remove("rag-panel-lock-size-snapped");
+                    sizePulseTimers.delete(element);
+                }, 850)
+            );
+
+            try {
+                navigator.vibrate?.(12);
+            } catch (_error) {}
+        };
+
+        const finite = (value, fallback = 0) => {
+            const number = Number(value);
+            return Number.isFinite(number) ? number : fallback;
+        };
+
+        const elementKind = (element) => {
+            if (!(element instanceof HTMLElement)) return "";
+
+            return [
+                "draggable-button",
+                "draggable-canvas",
+                "draggable-panel",
+                "draggable-collection_panel",
+                "draggable-scrolling_panel",
+            ].find((name) => element.classList.contains(name)) || "";
+        };
+
+        const geometryOf = (element) => {
+            const rect = element.getBoundingClientRect();
+            const styledWidth = parseFloat(element.style.width);
+            const styledHeight = parseFloat(element.style.height);
+            const styledLeft = parseFloat(element.style.left);
+            const styledTop = parseFloat(element.style.top);
+
+            const left = Number.isFinite(styledLeft)
+                ? styledLeft
+                : finite(element.offsetLeft);
+            const top = Number.isFinite(styledTop)
+                ? styledTop
+                : finite(element.offsetTop);
+            const width = Number.isFinite(styledWidth) && styledWidth > 0
+                ? styledWidth
+                : finite(element.offsetWidth, rect.width);
+            const height = Number.isFinite(styledHeight) && styledHeight > 0
+                ? styledHeight
+                : finite(element.offsetHeight, rect.height);
+
+            return {
+                element,
+                left,
+                top,
+                width,
+                height,
+                right: left + width,
+                bottom: top + height,
+                centerX: left + width / 2,
+                centerY: top + height / 2,
+                kind: elementKind(element),
+            };
+        };
+
+        const siblingRecords = (classElement, parent, element) => {
+            const records = [];
+
+            for (const instance of mods.index.GLOBAL_ELEMENT_MAP.values()) {
+                if (instance === classElement || instance?.container !== parent) {
+                    continue;
+                }
+
+                const sibling = instance?.getMainHTMLElement?.();
+                if (!(sibling instanceof HTMLElement) || sibling === element) {
+                    continue;
+                }
+
+                if (
+                    sibling.style.visibility === "hidden" ||
+                    sibling.style.display === "none" ||
+                    sibling.dataset.ragFixedDecorative === "true"
+                ) {
+                    continue;
+                }
+
+                records.push({
+                    ...geometryOf(sibling),
+                    instance,
+                });
+            }
+
+            return records;
         };
 
         const nearest = (current, candidates, radius) => {
@@ -4836,7 +5052,18 @@
             for (const candidate of candidates) {
                 const distance = Math.abs(candidate.value - current);
 
-                if (distance <= radius && (!match || distance < match.distance)) {
+                if (
+                    distance <= radius &&
+                    (
+                        !match ||
+                        distance < match.distance - 0.01 ||
+                        (
+                            Math.abs(distance - match.distance) <= 0.01 &&
+                            finite(candidate.priority, 10) <
+                                finite(match.priority, 10)
+                        )
+                    )
+                ) {
                     match = {
                         ...candidate,
                         distance,
@@ -4845,6 +5072,151 @@
             }
 
             return match;
+        };
+
+        const equalSpacingCandidates = (
+            siblings,
+            movingSize,
+            parentSize,
+            axis
+        ) => {
+            const startKey = axis === "x" ? "left" : "top";
+            const endKey = axis === "x" ? "right" : "bottom";
+            const ordered = [...siblings].sort(
+                (a, b) => a[startKey] - b[startKey]
+            );
+            const candidates = [];
+
+            const add = (value, segments, gap, mode) => {
+                if (
+                    value < -0.5 ||
+                    value + movingSize > parentSize + 0.5 ||
+                    !Number.isFinite(value)
+                ) {
+                    return;
+                }
+
+                candidates.push({
+                    value,
+                    kind: "spacing",
+                    priority: mode === "between" ? 2 : 3,
+                    segments,
+                    label: `ESPACO ${Math.round(gap)} px`,
+                });
+            };
+
+            for (let index = 0; index < ordered.length - 1; index += 1) {
+                const first = ordered[index];
+                const second = ordered[index + 1];
+                const referenceGap = second[startKey] - first[endKey];
+
+                if (referenceGap >= 2) {
+                    const after = second[endKey] + referenceGap;
+                    add(
+                        after,
+                        [[second[endKey], after]],
+                        referenceGap,
+                        "after"
+                    );
+
+                    const before = first[startKey] - referenceGap - movingSize;
+                    add(
+                        before,
+                        [[before + movingSize, first[startKey]]],
+                        referenceGap,
+                        "before"
+                    );
+                }
+
+                if (referenceGap >= movingSize + 4) {
+                    const gap = (referenceGap - movingSize) / 2;
+                    const between = first[endKey] + gap;
+
+                    add(
+                        between,
+                        [
+                            [first[endKey], between],
+                            [between + movingSize, second[startKey]],
+                        ],
+                        gap,
+                        "between"
+                    );
+                }
+            }
+
+            return candidates;
+        };
+
+        const sizeMatches = (
+            currentWidth,
+            currentHeight,
+            siblings,
+            radius,
+            maxWidth = Infinity,
+            maxHeight = Infinity
+        ) => ({
+            width: nearest(
+                currentWidth,
+                siblings
+                    .filter((record) => record.width <= maxWidth + 0.5)
+                    .map((record) => ({
+                        value: record.width,
+                        record,
+                        priority: 1,
+                    })),
+                radius
+            ),
+            height: nearest(
+                currentHeight,
+                siblings
+                    .filter((record) => record.height <= maxHeight + 0.5)
+                    .map((record) => ({
+                        value: record.height,
+                        record,
+                        priority: 1,
+                    })),
+                radius
+            ),
+        });
+
+        const radiusValue = () => Math.max(
+            1,
+            Number(mods.config.settings.panel_lock_radius.value) || 12
+        );
+
+        const panelLockEnabled = () =>
+            mods.config.settings.panel_lock.value === true;
+
+        const spacingEnabled = () =>
+            mods.config.settings.panel_lock_spacing?.value !== false;
+
+        const resizeEnabled = () =>
+            mods.config.settings.panel_lock_resize?.value !== false;
+
+        const showDragMatch = (
+            parent,
+            axis,
+            match,
+            geometry
+        ) => {
+            if (!match) return;
+
+            if (match.kind === "spacing") {
+                const cross = axis === "x"
+                    ? geometry.top + geometry.height / 2
+                    : geometry.left + geometry.width / 2;
+
+                addGapGuide(
+                    parent,
+                    axis,
+                    match.segments,
+                    cross,
+                    match.label
+                );
+                return;
+            }
+
+            addGuide(parent, axis, match.guide, match.label);
         };
 
         const originalDrag = shared.drag;
@@ -4875,63 +5247,130 @@
                 return result;
             }
 
-            const width = element.offsetWidth || element.getBoundingClientRect().width;
-            const height = element.offsetHeight || element.getBoundingClientRect().height;
+            const geometry = geometryOf(element);
+            const width = geometry.width;
+            const height = geometry.height;
             const parentWidth = parent.clientWidth || parent.getBoundingClientRect().width;
             const parentHeight = parent.clientHeight || parent.getBoundingClientRect().height;
-            const left = parseFloat(element.style.left) || 0;
-            const top = parseFloat(element.style.top) || 0;
-            const radius = Math.max(
-                1,
-                Number(mods.config.settings.panel_lock_radius.value) || 12
-            );
+            const left = geometry.left;
+            const top = geometry.top;
+            const radius = radiusValue();
 
             const xCandidates = [
-                { value: 0, guide: 0 },
-                { value: (parentWidth - width) / 2, guide: parentWidth / 2 },
-                { value: parentWidth - width, guide: parentWidth },
+                {
+                    value: 0,
+                    guide: 0,
+                    label: "BORDA ESQUERDA",
+                    priority: 8,
+                },
+                {
+                    value: (parentWidth - width) / 2,
+                    guide: parentWidth / 2,
+                    label: "CENTRO DO PAINEL",
+                    priority: 7,
+                },
+                {
+                    value: parentWidth - width,
+                    guide: parentWidth,
+                    label: "BORDA DIREITA",
+                    priority: 8,
+                },
             ];
             const yCandidates = [
-                { value: 0, guide: 0 },
-                { value: (parentHeight - height) / 2, guide: parentHeight / 2 },
-                { value: parentHeight - height, guide: parentHeight },
+                {
+                    value: 0,
+                    guide: 0,
+                    label: "BORDA SUPERIOR",
+                    priority: 8,
+                },
+                {
+                    value: (parentHeight - height) / 2,
+                    guide: parentHeight / 2,
+                    label: "MEIO DO PAINEL",
+                    priority: 7,
+                },
+                {
+                    value: parentHeight - height,
+                    guide: parentHeight,
+                    label: "BORDA INFERIOR",
+                    priority: 8,
+                },
             ];
 
-            for (const instance of mods.index.GLOBAL_ELEMENT_MAP.values()) {
-                if (instance === classElement || instance?.container !== parent) continue;
+            const siblings = siblingRecords(classElement, parent, element);
 
-                const sibling = instance?.getMainHTMLElement?.();
-                if (!(sibling instanceof HTMLElement) || sibling === element) continue;
-                if (sibling.style.visibility === "hidden" || sibling.dataset.ragFixedDecorative === "true") continue;
-
-                const siblingLeft = parseFloat(sibling.style.left) || 0;
-                const siblingTop = parseFloat(sibling.style.top) || 0;
-                const siblingWidth = sibling.offsetWidth || sibling.getBoundingClientRect().width;
-                const siblingHeight = sibling.offsetHeight || sibling.getBoundingClientRect().height;
+            for (const sibling of siblings) {
+                const siblingLeft = sibling.left;
+                const siblingTop = sibling.top;
+                const siblingWidth = sibling.width;
+                const siblingHeight = sibling.height;
 
                 xCandidates.push(
-                    { value: siblingLeft, guide: siblingLeft },
+                    {
+                        value: siblingLeft,
+                        guide: siblingLeft,
+                        label: "ESQUERDAS ALINHADAS",
+                        priority: 5,
+                    },
                     {
                         value: siblingLeft + (siblingWidth - width) / 2,
                         guide: siblingLeft + siblingWidth / 2,
+                        label: "CENTROS ALINHADOS",
+                        priority: 4,
                     },
                     {
                         value: siblingLeft + siblingWidth - width,
                         guide: siblingLeft + siblingWidth,
+                        label: "DIREITAS ALINHADAS",
+                        priority: 5,
                     }
                 );
 
                 yCandidates.push(
-                    { value: siblingTop, guide: siblingTop },
+                    {
+                        value: siblingTop,
+                        guide: siblingTop,
+                        label: "TOPOS ALINHADOS",
+                        priority: 5,
+                    },
                     {
                         value: siblingTop + (siblingHeight - height) / 2,
                         guide: siblingTop + siblingHeight / 2,
+                        label: "MEIOS ALINHADOS",
+                        priority: 4,
                     },
                     {
                         value: siblingTop + siblingHeight - height,
                         guide: siblingTop + siblingHeight,
+                        label: "BASES ALINHADAS",
+                        priority: 5,
                     }
                 );
+            }
+
+            if (spacingEnabled()) {
+                const sameKind = siblings.filter(
+                    (record) => record.kind && record.kind === geometry.kind
+                );
+
+                if (sameKind.length >= 2) {
+                    xCandidates.push(
+                        ...equalSpacingCandidates(
+                            sameKind,
+                            width,
+                            parentWidth,
+                            "x"
+                        )
+                    );
+                    yCandidates.push(
+                        ...equalSpacingCandidates(
+                            sameKind,
+                            height,
+                            parentHeight,
+                            "y"
+                        )
+                    );
+                }
             }
 
             const xMatch = nearest(left, xCandidates, radius);
@@ -4939,16 +5378,206 @@
 
             if (xMatch) {
                 element.style.left = `${xMatch.value}px`;
-                addGuide(parent, "x", xMatch.guide);
             }
 
             if (yMatch) {
                 element.style.top = `${yMatch.value}px`;
-                addGuide(parent, "y", yMatch.guide);
             }
+
+            const snappedGeometry = {
+                ...geometry,
+                left: xMatch?.value ?? left,
+                top: yMatch?.value ?? top,
+            };
+
+            showDragMatch(parent, "x", xMatch, snappedGeometry);
+            showDragMatch(parent, "y", yMatch, snappedGeometry);
 
             return result;
         };
+
+        const applyResizeSnap = (
+            event,
+            classElement,
+            outline = null
+        ) => {
+            clearGuides();
+
+            if (
+                !panelLockEnabled() ||
+                !resizeEnabled() ||
+                !classElement?.isResizing
+            ) {
+                return;
+            }
+
+            const element = classElement?.getMainHTMLElement?.();
+            const parent = classElement?.container;
+
+            if (!(element instanceof HTMLElement) || !(parent instanceof HTMLElement)) {
+                return;
+            }
+
+            const geometry = geometryOf(element);
+            const kind = geometry.kind;
+            const siblings = siblingRecords(classElement, parent, element)
+                .filter((record) => record.kind && record.kind === kind);
+
+            if (!siblings.length) return;
+
+            let width = geometry.width;
+            let height = geometry.height;
+            let outlineWidth = 0;
+
+            if (outline instanceof HTMLElement) {
+                outlineWidth =
+                    parseFloat(outline.style.outlineWidth) ||
+                    parseFloat(getComputedStyle(outline).outlineWidth) ||
+                    0;
+                width = Math.max(
+                    1,
+                    (parseFloat(outline.style.width) || 0) + outlineWidth
+                );
+                height = Math.max(
+                    1,
+                    (parseFloat(outline.style.height) || 0) + outlineWidth
+                );
+            }
+
+            const parentWidth =
+                parent.clientWidth || parent.getBoundingClientRect().width;
+            const parentHeight =
+                parent.clientHeight || parent.getBoundingClientRect().height;
+            const constrained =
+                mods.config.settings.boundary_constraints?.value === true ||
+                parent.dataset.ragClipsChildren === "true";
+            const maxWidth = constrained
+                ? Math.max(1, parentWidth - geometry.left)
+                : Infinity;
+            const maxHeight = constrained
+                ? Math.max(1, parentHeight - geometry.top)
+                : Infinity;
+            const matches = sizeMatches(
+                width,
+                height,
+                siblings,
+                radiusValue(),
+                maxWidth,
+                maxHeight
+            );
+
+            if (!matches.width && !matches.height) {
+                sizeMatchKeys.delete(element);
+                return;
+            }
+
+            let snappedWidth = matches.width?.value ?? width;
+            let snappedHeight = matches.height?.value ?? height;
+            const buttonState = classElement.getCurrentlyRenderedState?.();
+            const keepAspect =
+                (
+                    kind === "draggable-button" &&
+                    !buttonState?.json
+                ) ||
+                (
+                    kind === "draggable-canvas" &&
+                    !classElement.nineSlice &&
+                    element.dataset.ragKeepAspect === "true"
+                );
+
+            if (keepAspect && Number.isFinite(classElement.aspectRatio)) {
+                if (matches.width && !matches.height) {
+                    snappedHeight = snappedWidth / classElement.aspectRatio;
+                } else if (matches.height && !matches.width) {
+                    snappedWidth = snappedHeight * classElement.aspectRatio;
+                }
+            }
+
+            snappedWidth = Math.max(1, Math.min(snappedWidth, maxWidth));
+            snappedHeight = Math.max(1, Math.min(snappedHeight, maxHeight));
+
+            if (outline instanceof HTMLElement) {
+                outline.style.width =
+                    `${Math.max(1, snappedWidth - outlineWidth)}px`;
+                outline.style.height =
+                    `${Math.max(1, snappedHeight - outlineWidth)}px`;
+            } else {
+                if (event?.altKey && matches.width) {
+                    const left = geometry.left - (snappedWidth - width) / 2;
+                    element.style.left = `${left}px`;
+                    geometry.left = left;
+                }
+
+                if (event?.altKey && matches.height) {
+                    const top = geometry.top - (snappedHeight - height) / 2;
+                    element.style.top = `${top}px`;
+                    geometry.top = top;
+                }
+
+                element.style.width = `${snappedWidth}px`;
+                element.style.height = `${snappedHeight}px`;
+            }
+
+            const key = [
+                matches.width ? Math.round(snappedWidth * 10) / 10 : "-",
+                matches.height ? Math.round(snappedHeight * 10) / 10 : "-",
+            ].join(":");
+
+            pulseSizeMatch(element, key);
+            addSizeGuides(
+                parent,
+                geometry,
+                snappedWidth,
+                snappedHeight,
+                matches.width,
+                matches.height
+            );
+        };
+
+        const originalResize = shared.resize;
+
+        shared.resize = function (event, classElement, ...args) {
+            const result = originalResize.call(
+                this,
+                event,
+                classElement,
+                ...args
+            );
+            applyResizeSnap(event, classElement);
+            return result;
+        };
+
+        const patchOutlineResize = (prototype) => {
+            if (!prototype || prototype.__ragPanelLockResizeV44) return;
+
+            prototype.__ragPanelLockResizeV44 = true;
+            const original = prototype.resize;
+
+            prototype.resize = function (event, ...args) {
+                const result = original.call(this, event, ...args);
+                applyResizeSnap(event, this, this.outlineDiv);
+                return result;
+            };
+        };
+
+        const buttonPrototype = mods.DraggableButton?.prototype;
+        if (
+            buttonPrototype &&
+            !buttonPrototype.__ragPanelLockOutlineV44
+        ) {
+            buttonPrototype.__ragPanelLockOutlineV44 = true;
+            const originalOutlineResize = buttonPrototype.outlineResize;
+
+            buttonPrototype.outlineResize = function (event, ...args) {
+                const result = originalOutlineResize.call(this, event, ...args);
+                applyResizeSnap(event, this, this.outlineDiv);
+                return result;
+            };
+        }
+
+        // Canvas uses resize itself as the live outline-resize method. This is
+        // patched after the image resize compatibility layer is installed.
+        patchOutlineResize(mods.DraggableCanvas?.prototype);
 
         const originalStopDrag = shared.stopDrag;
 
@@ -4958,8 +5587,29 @@
             return result;
         };
 
+        const originalStopResize = shared.stopResize;
+
+        shared.stopResize = function (classElement, ...args) {
+            const result = originalStopResize.call(
+                this,
+                classElement,
+                ...args
+            );
+            clearGuides();
+
+            const element = classElement?.getMainHTMLElement?.();
+            if (element instanceof HTMLElement) {
+                sizeMatchKeys.delete(element);
+            }
+
+            return result;
+        };
+
         window.__RAG_PANEL_LOCK__ = {
             clearGuides,
+            equalSpacingCandidates,
+            nearest,
+            sizeMatches,
         };
     }
 
@@ -15712,6 +16362,23 @@
     box-shadow: 0 0 5px rgba(0, 217, 255, .9);
 }
 
+.rag-panel-lock-badge,
+.rag-panel-lock-gap-label,
+.rag-panel-lock-size-label {
+    position: absolute;
+    z-index: 2147481502;
+    min-width: max-content;
+    padding: 3px 6px;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    background: rgba(9, 13, 18, .94);
+    color: #8cefff;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .65);
+    font: 700 10px/1.15 Arial, sans-serif;
+    letter-spacing: .035em;
+    white-space: nowrap;
+}
+
 .rag-panel-lock-x {
     top: 0;
     bottom: 0;
@@ -15719,11 +16386,134 @@
     transform: translateX(-1px);
 }
 
+.rag-panel-lock-x > .rag-panel-lock-badge {
+    top: 8px;
+    left: 6px;
+}
+
 .rag-panel-lock-y {
     left: 0;
     right: 0;
     height: 2px;
     transform: translateY(-1px);
+}
+
+.rag-panel-lock-y > .rag-panel-lock-badge {
+    top: -25px;
+    left: 8px;
+}
+
+.rag-panel-lock-gap {
+    position: absolute;
+    z-index: 2147481501;
+    pointer-events: none;
+    background: #ffbf2f;
+    color: #ffd875;
+    box-shadow: 0 0 6px rgba(255, 191, 47, .95);
+}
+
+.rag-panel-lock-gap::before,
+.rag-panel-lock-gap::after {
+    content: "";
+    position: absolute;
+    background: currentColor;
+}
+
+.rag-panel-lock-gap-x {
+    height: 2px;
+    transform: translateY(-1px);
+}
+
+.rag-panel-lock-gap-x::before,
+.rag-panel-lock-gap-x::after {
+    top: -4px;
+    width: 2px;
+    height: 10px;
+}
+
+.rag-panel-lock-gap-x::before {
+    left: 0;
+}
+
+.rag-panel-lock-gap-x::after {
+    right: 0;
+}
+
+.rag-panel-lock-gap-x > .rag-panel-lock-gap-label {
+    top: -27px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: #ffd875;
+}
+
+.rag-panel-lock-gap-y {
+    width: 2px;
+    transform: translateX(-1px);
+}
+
+.rag-panel-lock-gap-y::before,
+.rag-panel-lock-gap-y::after {
+    left: -4px;
+    width: 10px;
+    height: 2px;
+}
+
+.rag-panel-lock-gap-y::before {
+    top: 0;
+}
+
+.rag-panel-lock-gap-y::after {
+    bottom: 0;
+}
+
+.rag-panel-lock-gap-y > .rag-panel-lock-gap-label {
+    top: 50%;
+    left: 7px;
+    transform: translateY(-50%);
+    color: #ffd875;
+}
+
+.rag-panel-lock-size-box {
+    position: absolute;
+    z-index: 2147481499;
+    box-sizing: border-box;
+    pointer-events: none;
+    border: 2px dashed #8eff72;
+    background: rgba(102, 255, 94, .035);
+    box-shadow:
+        0 0 0 1px rgba(0, 0, 0, .75),
+        0 0 8px rgba(92, 255, 103, .7);
+}
+
+.rag-panel-lock-size-reference {
+    border-style: dotted;
+    opacity: .72;
+}
+
+.rag-panel-lock-size-current {
+    border-style: solid;
+}
+
+.rag-panel-lock-size-label {
+    color: #9dff88;
+    transform: translate(-50%, -100%);
+}
+
+.rag-panel-lock-size-snapped {
+    animation: rag-panel-lock-size-pulse .85s ease-out;
+}
+
+@keyframes rag-panel-lock-size-pulse {
+    0%, 35% {
+        box-shadow: 0 0 0 0 rgba(120, 255, 92, 0);
+    }
+    45% {
+        box-shadow: 0 0 0 4px rgba(120, 255, 92, .95),
+            0 0 14px rgba(120, 255, 92, .9);
+    }
+    100% {
+        box-shadow: 0 0 0 0 rgba(120, 255, 92, 0);
+    }
 }
 
 @media (pointer: coarse) {
@@ -15874,7 +16664,6 @@
         patchNativeRoundTrip(mods);
         patchSelectedItemDragLock(mods);
         patchNestedPanelDrag(mods);
-        patchPanelLock(mods);
         patchCopyPasteMetadata(mods);
         patchCopyPasteAutoChrome(mods);
         patchExplorerNames(mods);
@@ -15889,6 +16678,9 @@
         await installImageParentLock();
         installFilePicker();
         await installImageResizeAndReplacement();
+        // Install last so Canvas resize snapping wraps the compatibility
+        // resize path used by imported and native textures alike.
+        patchPanelLock(mods);
         await installHybridUpload();
         observeProperties();
 

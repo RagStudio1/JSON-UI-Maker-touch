@@ -1,5 +1,15 @@
-JSON-UI-Maker Patch v43
-Build: v43-safe-rebuild-background-delete
+JSON-UI-Maker Patch v44
+Build: v44-panel-lock-spacing-size
+
+PANEL LOCK COM ALINHAMENTO INTELIGENTE:
+- mostra guias nomeadas para bordas, centros, topos, meios e bases
+- detecta espacamento repetido entre itens do mesmo tipo no mesmo painel
+- sugere a terceira posicao antes, entre ou depois de dois itens existentes
+- exibe a distancia sugerida em pixels durante o arraste
+- redimensionamento encaixa em largura, altura ou tamanho completo de item irmao
+- feedback verde e vibracao curta avisam quando o tamanho coincide
+- imagens, botoes, paineis, colecoes e paineis com scroll usam a mesma assistencia
+- novas opcoes permitem desligar espacamento igual ou correspondencia de tamanho
 
 EXCLUSAO SEGURA NO IMAGEM -> UI:
 - o painel raiz UI RECONSTRUIDA fica protegido contra exclusao acidental
