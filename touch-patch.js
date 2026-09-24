@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v41-structural-image-analysis";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v42-layer-order-controls";
 
-    const BUILD = "v41-structural-image-analysis";
+    const BUILD = "v42-layer-order-controls";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -49,6 +49,8 @@
     const explorerTouchStarts = new Map();
 
     let imageParentLock = null;
+    let imageParentSource = null;
+    const imageDestinationMap = new Map();
     let modulesPromise = null;
     let propertyObserver = null;
 
@@ -149,6 +151,7 @@
             import("./dist/copy_paste/copy.js"),
             import("./dist/copy_paste/paste.js"),
             import("./dist/ui/explorer/explorerController.js"),
+            import("./dist/keyboard/undoRedo.js"),
         ]).then(([
             index,
             configMod,
@@ -166,6 +169,7 @@
             copyMod,
             pasteMod,
             explorerMod,
+            undoMod,
         ]) => ({
             index,
             config: configMod.config,
@@ -188,6 +192,7 @@
             Paster: pasteMod.Paster,
             pasteConversionMap: pasteMod.pasteConversionMap,
             ExplorerController: explorerMod.ExplorerController,
+            undoRedoManager: undoMod.undoRedoManager,
         }));
 
         return modulesPromise;
@@ -946,6 +951,149 @@
         return null;
     }
 
+    function directImageContainerChildren(container) {
+        if (!(container instanceof HTMLElement)) return [];
+
+        return [...container.children]
+            .map((child) => {
+                if (!(child instanceof HTMLElement)) return null;
+
+                return child.dataset.skip === "true"
+                    ? child.firstElementChild
+                    : child;
+            })
+            .filter(
+                (child) =>
+                    isValidImageContainer(child) &&
+                    child.dataset.ragHeader !== "true" &&
+                    child.dataset.ragFixedDecorative !== "true"
+            );
+    }
+
+    function imageContainerName(container) {
+        if (container.dataset.ragBorderContentSlot === "true") {
+            return "AREA DE CONTEUDO";
+        }
+
+        if (container.dataset.ragExplorerName) {
+            return container.dataset.ragExplorerName;
+        }
+
+        if (container.classList.contains("draggable-collection_panel")) {
+            return "COLLECTION PANEL";
+        }
+
+        if (container.classList.contains("draggable-scrolling_panel")) {
+            return "SCROLLING PANEL";
+        }
+
+        return "PANEL";
+    }
+
+    function imageContainerChoices(source) {
+        if (!isValidImageContainer(source)) return [];
+
+        const result = [];
+
+        const visit = (container, depth) => {
+            result.push({ container, depth });
+
+            for (const child of directImageContainerChildren(container)) {
+                visit(child, depth + 1);
+            }
+        };
+
+        visit(source, 0);
+        return result;
+    }
+
+    function suggestedImageContainer(source, role = "image") {
+        if (!isValidImageContainer(source) || role !== "image") {
+            return source;
+        }
+
+        const children = directImageContainerChildren(source);
+        const contentSlots = children.filter(
+            (child) => child.dataset.ragBorderContentSlot === "true"
+        );
+
+        if (contentSlots.length === 1) return contentSlots[0];
+        if (children.length === 1) return children[0];
+
+        return source;
+    }
+
+    function refreshImageDestinationPicker(
+        source = imageParentSource,
+        role = selectedImageRole()
+    ) {
+        const select = document.querySelector(
+            "#modalChooseImage .rag-image-destination-select"
+        );
+        const help = document.querySelector(
+            "#modalChooseImage .rag-image-destination-help"
+        );
+
+        if (!(select instanceof HTMLSelectElement)) return;
+
+        select.innerHTML = "";
+        imageDestinationMap.clear();
+
+        const choices = imageContainerChoices(source);
+
+        if (!choices.length) {
+            const option = document.createElement("option");
+            option.textContent = "Selecione um painel primeiro";
+            option.value = "";
+            select.appendChild(option);
+            select.disabled = true;
+            imageParentLock = source;
+            if (help) help.textContent = "Nenhum painel de destino selecionado.";
+            return;
+        }
+
+        select.disabled = false;
+
+        for (const { container, depth } of choices) {
+            const id = container.dataset.id;
+            const option = document.createElement("option");
+            const prefix = depth === 0
+                ? "PAINEL SELECIONADO"
+                : `${"↳ ".repeat(depth)}${imageContainerName(container)}`;
+
+            option.value = id;
+            option.textContent = prefix;
+            select.appendChild(option);
+            imageDestinationMap.set(id, container);
+        }
+
+        const suggested = suggestedImageContainer(source, role);
+        const suggestedId = suggested?.dataset?.id || source.dataset.id;
+
+        select.value = suggestedId;
+        imageParentLock =
+            imageDestinationMap.get(select.value) || source;
+
+        if (help) {
+            help.textContent =
+                role === "image" && suggested !== source
+                    ? "Painel filho unico escolhido automaticamente."
+                    : "A imagem sera filha direta deste painel.";
+        }
+    }
+
+    function selectedImageDestination() {
+        const select = document.querySelector(
+            "#modalChooseImage .rag-image-destination-select"
+        );
+
+        if (!(select instanceof HTMLSelectElement)) {
+            return imageParentLock;
+        }
+
+        return imageDestinationMap.get(select.value) || imageParentLock;
+    }
+
     function restoreImageParent() {
         if (!(imageParentLock instanceof HTMLElement)) return;
         if (!document.contains(imageParentLock)) return;
@@ -1190,25 +1338,35 @@
         const oldAdd = Builder.addCanvas;
 
         Builder.openAddImageMenu = async function (...args) {
-            const previous = imageParentLock;
-            imageParentLock = resolveImageContainer() || selectedMainElement();
+            const previousLock = imageParentLock;
+            const previousSource = imageParentSource;
+            imageParentSource =
+                resolveImageContainer() || selectedMainElement();
+            imageParentLock = imageParentSource;
             resetImageRole();
+            refreshImageDestinationPicker(
+                imageParentSource,
+                "image"
+            );
 
             try {
                 return await oldOpen.apply(this, args);
             } finally {
-                imageParentLock = previous;
+                imageParentLock = previousLock;
+                imageParentSource = previousSource;
+                imageDestinationMap.clear();
             }
         };
 
         Builder.addCanvas = function (...args) {
-            restoreImageParent();
-
             const selectedRole = selectedImageRole();
             const role =
                 selectedRole === "button_texture"
                     ? "image"
                     : selectedRole;
+
+            imageParentLock = selectedImageDestination();
+            restoreImageParent();
 
             const texturePath = normalizeTexture(args[1]);
             const textureState = mods.index.images.get(texturePath);
@@ -1739,6 +1897,41 @@
 
         roleBox.append(roleTitle, roleSelect, roleHelp);
 
+        const destinationBox = document.createElement("label");
+        destinationBox.className = "rag-image-destination-box";
+
+        const destinationTitle = document.createElement("span");
+        destinationTitle.textContent = "ADICIONAR DENTRO DE:";
+
+        const destinationSelect = document.createElement("select");
+        destinationSelect.className = "rag-image-destination-select";
+
+        const destinationHelp = document.createElement("small");
+        destinationHelp.className = "rag-image-destination-help";
+        destinationHelp.textContent = "Selecione um painel primeiro.";
+
+        destinationBox.append(
+            destinationTitle,
+            destinationSelect,
+            destinationHelp
+        );
+
+        roleSelect.addEventListener("change", () => {
+            refreshImageDestinationPicker(
+                imageParentSource,
+                roleSelect.value
+            );
+        });
+
+        destinationSelect.addEventListener("change", () => {
+            imageParentLock =
+                imageDestinationMap.get(destinationSelect.value) ||
+                imageParentSource;
+
+            destinationHelp.textContent =
+                "A imagem sera filha direta deste painel.";
+        });
+
         const filesButton = document.createElement("button");
         filesButton.type = "button";
         filesButton.textContent = "ESCOLHER ARQUIVO";
@@ -1801,6 +1994,7 @@
 
         wrapper.append(
             roleBox,
+            destinationBox,
             filesButton,
             galleryButton,
             status,
@@ -9892,7 +10086,273 @@
         );
     }
 
-    function installExplorerDock() {
+    function layerDomUnit(element) {
+        const wrapper = element?.parentElement;
+
+        if (
+            wrapper instanceof HTMLElement &&
+            wrapper.dataset.skip === "true" &&
+            wrapper.firstElementChild === element
+        ) {
+            return wrapper;
+        }
+
+        return element;
+    }
+
+    function directLayerEntries(parent) {
+        if (!(parent instanceof HTMLElement)) return [];
+
+        return [...parent.children]
+            .map((unit, domIndex) => {
+                if (!(unit instanceof HTMLElement)) return null;
+
+                const element =
+                    unit.dataset.skip === "true"
+                        ? unit.firstElementChild
+                        : unit;
+
+                if (
+                    !(element instanceof HTMLElement) ||
+                    !element.dataset.id
+                ) {
+                    return null;
+                }
+
+                const parsedLayer = Number(element.style.zIndex);
+
+                return {
+                    element,
+                    unit,
+                    domIndex,
+                    layer: Number.isFinite(parsedLayer)
+                        ? parsedLayer
+                        : 0,
+                };
+            })
+            .filter(Boolean);
+    }
+
+    function selectedLayerContext(mods) {
+        const selected = mods.index.selectedElement;
+
+        if (!(selected instanceof HTMLElement)) return null;
+
+        const unit = layerDomUnit(selected);
+        const parent = unit?.parentElement;
+
+        if (!(parent instanceof HTMLElement)) return null;
+
+        const entries = directLayerEntries(parent);
+        const selectedEntry = entries.find(
+            (entry) => entry.element === selected
+        );
+
+        if (!selectedEntry) return null;
+
+        // CSS paints the greater z-index in front. For equal layers, the
+        // element that appears later in the DOM is in front.
+        const frontToBack = [...entries]
+            .sort(
+                (a, b) =>
+                    a.layer - b.layer ||
+                    a.domIndex - b.domIndex
+            )
+            .reverse();
+
+        return {
+            selected,
+            parent,
+            entries,
+            frontToBack,
+            index: frontToBack.indexOf(selectedEntry),
+        };
+    }
+
+    function captureLayerOrder(parent, mods) {
+        return {
+            parent,
+            items: directLayerEntries(parent).map((entry) => {
+                const instance = mods.index.GLOBAL_ELEMENT_MAP.get(
+                    entry.element.dataset.id
+                );
+
+                return {
+                    id: entry.element.dataset.id,
+                    layer: entry.element.style.zIndex,
+                    unitLayer: entry.unit.style.zIndex,
+                    shadowLayer: instance?.shadowLabel?.style?.zIndex ?? "",
+                };
+            }),
+        };
+    }
+
+    function restoreLayerOrder(snapshot, mods) {
+        const parent = snapshot?.parent;
+
+        if (!(parent instanceof HTMLElement)) return;
+
+        for (const item of snapshot.items || []) {
+            const instance = mods.index.GLOBAL_ELEMENT_MAP.get(item.id);
+            const element = instance?.getMainHTMLElement?.();
+
+            if (!(element instanceof HTMLElement)) continue;
+
+            const unit = layerDomUnit(element);
+
+            if (!(unit instanceof HTMLElement) || unit.parentElement !== parent) {
+                continue;
+            }
+
+            element.style.zIndex = item.layer;
+            unit.style.zIndex = item.unitLayer;
+
+            if (instance?.shadowLabel) {
+                instance.shadowLabel.style.zIndex = item.shadowLayer;
+            }
+
+            parent.appendChild(unit);
+        }
+
+        mods.ExplorerController.updateExplorer();
+        mods.updatePropertiesArea?.();
+        window.dispatchEvent(new Event("rag-layer-order-change"));
+    }
+
+    function applyFrontToBackOrder(frontToBack, parent, mods) {
+        const count = frontToBack.length;
+
+        for (let index = 0; index < count; index++) {
+            const entry = frontToBack[index];
+            const layer = (count - index) * 10;
+            const instance = mods.index.GLOBAL_ELEMENT_MAP.get(
+                entry.element.dataset.id
+            );
+
+            entry.element.style.zIndex = String(layer);
+
+            if (entry.unit !== entry.element) {
+                entry.unit.style.zIndex = String(layer);
+            }
+
+            if (instance?.shadowLabel) {
+                instance.shadowLabel.style.zIndex = String(
+                    Math.max(0, layer - 1)
+                );
+            }
+
+            // The explorer follows DOM order. Keep its first item as the
+            // front-most layer so the list and the preview agree.
+            parent.appendChild(entry.unit);
+        }
+    }
+
+    function patchLayerOrderUndo(mods) {
+        const manager = mods.undoRedoManager;
+
+        if (!manager || manager.__ragLayerOrderV42) return;
+
+        manager.__ragLayerOrderV42 = true;
+
+        const originalPerform = manager.performOperation.bind(manager);
+        const originalReverse = manager.performReverseOperation.bind(manager);
+
+        manager.performOperation = function (operation) {
+            if (operation?.type === "layer-order") {
+                restoreLayerOrder(operation.newState, mods);
+                return;
+            }
+
+            return originalPerform(operation);
+        };
+
+        manager.performReverseOperation = function (operation) {
+            if (operation?.type === "layer-order") {
+                restoreLayerOrder(operation.previousState, mods);
+                return;
+            }
+
+            return originalReverse(operation);
+        };
+    }
+
+    function moveSelectedLayer(mods, direction) {
+        const context = selectedLayerContext(mods);
+
+        if (!context) {
+            showBanner(
+                "Selecione um item na lista de camadas primeiro.",
+                "error"
+            );
+            return false;
+        }
+
+        if (context.frontToBack.length < 2) {
+            showBanner(
+                "Este painel nao possui outra camada para trocar.",
+                "normal"
+            );
+            return false;
+        }
+
+        const nextIndex = context.index + direction;
+
+        if (
+            nextIndex < 0 ||
+            nextIndex >= context.frontToBack.length
+        ) {
+            showBanner(
+                direction < 0
+                    ? "O item ja esta na frente."
+                    : "O item ja esta atras de todos.",
+                "normal"
+            );
+            return false;
+        }
+
+        const previousState = captureLayerOrder(
+            context.parent,
+            mods
+        );
+
+        const order = [...context.frontToBack];
+        [order[context.index], order[nextIndex]] =
+            [order[nextIndex], order[context.index]];
+
+        applyFrontToBackOrder(
+            order,
+            context.parent,
+            mods
+        );
+
+        mods.ExplorerController.updateExplorer();
+        mods.updatePropertiesArea?.();
+
+        const newState = captureLayerOrder(
+            context.parent,
+            mods
+        );
+
+        mods.undoRedoManager?.push({
+            type: "layer-order",
+            elementId: context.selected.dataset.id,
+            previousState,
+            newState,
+        });
+
+        window.dispatchEvent(new Event("rag-layer-order-change"));
+
+        showBanner(
+            direction < 0
+                ? "Item movido uma camada para frente."
+                : "Item movido uma camada para tras.",
+            "success"
+        );
+
+        return true;
+    }
+
+    function installExplorerDock(mods) {
         const explorer = document.getElementById("explorer");
 
         if (!explorer || document.querySelector(".rag-explorer-dock")) return;
@@ -9919,8 +10379,49 @@
         reopen.className = "rag-explorer-reopen";
         reopen.textContent = "ITENS";
 
+        const layerTools = document.createElement("div");
+        layerTools.className = "rag-explorer-layer-tools";
+
+        const layerStatus = document.createElement("span");
+        layerStatus.className = "rag-layer-order-status";
+
+        const moveFront = document.createElement("button");
+        moveFront.type = "button";
+        moveFront.className = "rag-layer-move rag-layer-move-front";
+        moveFront.textContent = "↑ SUBIR / FRENTE";
+        moveFront.title = "Move o item uma camada para frente";
+
+        const moveBack = document.createElement("button");
+        moveBack.type = "button";
+        moveBack.className = "rag-layer-move rag-layer-move-back";
+        moveBack.textContent = "↓ DESCER / TRAS";
+        moveBack.title = "Move o item uma camada para tras";
+
         const updateCount = () => {
             count.textContent = `${explorer.querySelectorAll(".explorerDiv").length} itens`;
+        };
+
+        const updateLayerControls = () => {
+            const context = selectedLayerContext(mods);
+
+            if (!context) {
+                layerStatus.textContent = "SELECIONE UM ITEM";
+                moveFront.disabled = true;
+                moveBack.disabled = true;
+                return;
+            }
+
+            const total = context.frontToBack.length;
+            const position = context.index + 1;
+
+            layerStatus.textContent =
+                total > 1
+                    ? `ORDEM ${position}/${total} • 1 = FRENTE`
+                    : "UNICA CAMADA NESTE PAINEL";
+
+            moveFront.disabled = total < 2 || context.index <= 0;
+            moveBack.disabled =
+                total < 2 || context.index >= total - 1;
         };
 
         const setOpen = (open) => {
@@ -9930,17 +10431,37 @@
 
         close.addEventListener("click", () => setOpen(false));
         reopen.addEventListener("click", () => setOpen(true));
-
-        header.append(title, count, close);
-        dock.append(header, explorer);
-        document.body.append(dock, reopen);
-
-        new MutationObserver(updateCount).observe(explorer, {
-            childList: true,
-            subtree: true,
+        moveFront.addEventListener("click", () => {
+            moveSelectedLayer(mods, -1);
+            updateLayerControls();
+        });
+        moveBack.addEventListener("click", () => {
+            moveSelectedLayer(mods, 1);
+            updateLayerControls();
         });
 
+        header.append(title, count, close);
+        layerTools.append(layerStatus, moveFront, moveBack);
+        dock.append(header, layerTools, explorer);
+        document.body.append(dock, reopen);
+
+        new MutationObserver(() => {
+            updateCount();
+            updateLayerControls();
+        }).observe(explorer, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ["class"],
+        });
+
+        window.addEventListener(
+            "rag-layer-order-change",
+            updateLayerControls
+        );
+
         updateCount();
+        updateLayerControls();
         setOpen(true);
     }
 
@@ -13813,6 +14334,7 @@
 }
 
 .rag-image-role-box,
+.rag-image-destination-box,
 .rag-image-property-role {
     display: flex;
     flex-direction: column;
@@ -13823,6 +14345,7 @@
 }
 
 .rag-image-role-box select,
+.rag-image-destination-box select,
 .rag-image-property-role select {
     width: 100%;
     min-height: 42px;
@@ -13834,7 +14357,8 @@
     font-weight: 800;
 }
 
-.rag-image-role-box small {
+.rag-image-role-box small,
+.rag-image-destination-box small {
     color: #aaa;
     font-size: 9px;
     font-weight: 500;
@@ -14930,6 +15454,52 @@
     touch-action: manipulation;
 }
 
+.rag-explorer-layer-tools {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 7px;
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(166, 66, 222, .48);
+    background: #242329;
+}
+
+.rag-layer-order-status {
+    grid-column: 1 / -1;
+    min-height: 16px;
+    overflow: hidden;
+    color: #d9b4ec;
+    font-size: 10px;
+    font-weight: 900;
+    letter-spacing: .04em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rag-layer-move {
+    min-width: 0;
+    min-height: 38px;
+    padding: 7px 8px;
+    border: 1px solid rgba(217, 180, 236, .65);
+    border-radius: 7px;
+    background: linear-gradient(180deg, #4b4055, #312c37);
+    color: white;
+    font-size: 11px;
+    font-weight: 900;
+    touch-action: manipulation;
+}
+
+.rag-layer-move:active:not(:disabled) {
+    transform: translateY(1px);
+    background: #682684;
+}
+
+.rag-layer-move:disabled {
+    border-color: rgba(255, 255, 255, .12);
+    background: #29282d;
+    color: #77737a;
+    opacity: .72;
+}
+
 .rag-explorer-reopen {
     position: fixed;
     top: 70px;
@@ -15006,7 +15576,8 @@
     }
 
     .rag-explorer-close,
-    .rag-explorer-reopen {
+    .rag-explorer-reopen,
+    .rag-layer-move {
         min-height: 46px;
     }
 
@@ -15147,11 +15718,12 @@
         patchCopyPasteMetadata(mods);
         patchCopyPasteAutoChrome(mods);
         patchExplorerNames(mods);
+        patchLayerOrderUndo(mods);
 
         installCopyPasteButtons(mods);
         installExpandedSidebar(mods);
         installScreenshotRebuilder(mods);
-        installExplorerDock();
+        installExplorerDock(mods);
 
         await installImageParentLock();
         installFilePicker();

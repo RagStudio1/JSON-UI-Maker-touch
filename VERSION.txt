@@ -1,5 +1,18 @@
-JSON-UI-Maker Patch v41
-Build: v41-structural-image-analysis
+JSON-UI-Maker Patch v42
+Build: v42-layer-order-controls
+
+CONTROLES DE ORDEM EM ITENS / CAMADAS:
+- novo botao SUBIR / FRENTE move o item uma camada para frente
+- novo botao DESCER / TRAS move o item uma camada para tras
+- a troca acontece somente entre itens do mesmo painel pai
+- paineis aninhados levam todo o seu conteudo junto
+- a lista passa a mostrar a camada da frente primeiro
+- a ordem e salva em layer no JSON exportado
+- alteracoes de camada funcionam com Desfazer e Refazer
+- botoes ficam desativados quando o item ja chegou ao limite
+- seletor ADICIONAR DENTRO DE mostra o painel pai e seus paineis filhos
+- imagem normal usa automaticamente o unico painel filho disponivel
+- background, borda e header continuam respeitando o painel escolhido
 
 ANALISE ESTRUTURAL REFEITA:
 - remove deteccao por blocos de cor que confundia letras e pixels de sprites
