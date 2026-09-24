@@ -1,82 +1,18 @@
-JSON-UI-Maker Patch v33
-Build: v33-readable-texture-fallbacks
+JSON-UI-Maker Patch v34
+Build: v34-compound-button-import
 
-FALLBACK DE TEXTURAS:
-- removido o xadrez magenta repetitivo que escondia a estrutura da UI
-- cada textura ausente recebe cor estavel e categoria visual propria
-- fallback mostra tipo, nome e caminho da textura ausente
-- etiqueta nitida permanece legivel sobre o elemento no editor
-- contorno amarelo tracejado identifica elementos incompletos
-- painel recolhivel lista todos os caminhos ausentes para importacao
-- a lista e limpa e recalculada a cada novo form importado
-- ao fornecer a textura correta, etiqueta e aviso sao removidos
+IMPORTACAO E CRIACAO DE BOTOES:
+- botoes agora sao importados como um unico componente composto
+- fundo, texto, icone e estados default/hover/pressed permanecem sincronizados
+- controles internos de estado nao viram imagens e labels duplicados
+- imagens pequenas de botao nao sao mais ampliadas para 80% do painel pai
+- a textura preserva seu tamanho original e apenas encolhe quando nao cabe
+- o texto inicial fica realmente centralizado dentro do botao
+- redimensionar um botao mantem centralizado um texto que ja estava no centro
+- offsets personalizados de texto continuam preservados
+- trocar texturas nao altera a caixa atual do botao
+- round-trip restaura texto, icone e a ausencia de icone sem placeholder fantasma
+- fallbacks de textura ausente tambem funcionam no componente de botao
 
-SELECTION DRAG LOCK:
-- somente o item atualmente selecionado pode ser movido
-- arrastar outro item enquanto existe uma selecao nao altera sua posicao
-- toque/clique continua permitindo selecionar outro item normalmente
-- evita movimentos acidentais em paineis com elementos sobrepostos
-
-EXPORTAR / IMPORTAR:
-- paineis exportam tamanho e posicao pelas coordenadas CSS do editor
-- o zoom/escala do navegador nao altera mais a geometria salva
-- metadados do editor sao preservados em $rag_editor
-- roles de BACKGROUND, BORDER, HEADER e CONTENT SLOT voltam corretamente
-- clipping, editabilidade, ordem de camada e tamanho exato sao restaurados
-- arquivos antigos detectam bordas grandes por textura/camada e as tornam decorativas
-- bordas transparentes nao bloqueiam mais cliques nos controles internos
-- background continua editavel depois de importar
-
-EXPLORER MOBILE:
-- lista de itens em painel fixo completo no lado direito
-- altura total da tela, sem limite antigo de 381px
-- scroll vertical e horizontal nativo no Android
-- arrastar a lista nao seleciona itens por acidente
-- painel pode ser recolhido e reaberto pelo botao ITENS
-- alvos touch maiores e contador de itens
-
-PANEL LOCK:
-- nova opcao Panel Lock (Smart Align) nas configuracoes
-- alinha itens do mesmo painel por bordas e centros
-- tambem alinha ao centro e as bordas do painel pai
-- raio de encaixe configuravel em Panel Lock Radius
-- guias azuis mostram o eixo sincronizado durante o arraste
-- funciona junto ou separado do Grid Lock
-
-SHOW GRID:
-- restaurado o comportamento original de SebTheSigma/JSON-UI-Maker
-- restaurado o grid 2x2 permanente que marca o centro da preview
-- restaurada a bolinha azul no centro do item enquanto ele e movido
-- restaurada a cor original das grades: rgb(55, 55, 55), linhas de 2px
-- painel selecionado mantem a grade visivel quando Show Grid esta ativo
-- ao mover um item, a grade do painel pai aparece durante o arraste
-- removida a camada magenta persistente que cobria detalhes das imagens
-- removida a varredura de todos os elementos a cada selecao/arraste
-- preservados os pontos, handles e hit testing originais
-
-LAYER ORDER CORRIGIDA:
-- BACKGROUND: z-index 10, EDITAVEL
-- CONTENT SLOT: z-index 20
-- BORDER: z-index 60, FIXO
-- HEADER: z-index 120, EDITAVEL
-
-BACKGROUND:
-- nao e mais ragFixedDecorative
-- pointer/touch ativo
-- resize handle ativo
-- pode mover e redimensionar normalmente
-- auto-fit acontece apenas UMA vez na criacao
-- depois o sistema nao sobrescreve posicao/tamanho do usuario
-- botao AJUSTAR AO CONTENT SLOT nas propriedades
-
-EXPLORER:
-- elementos especiais ganham nomes reais:
-  BACKGROUND
-  BORDER
-  HEADER
-  HEADER TEXTURE
-  CONTENT SLOT
-- header aparece explicitamente na lista
-
-Mantem V26 assets Nordic built-in, V25 Border System, V24 copy/paste fix,
-Text Field/Dropdown/Toggle/Slider, clipping, touch, grid e sidecar nativo.
+Mantem V33 fallbacks legiveis, V32 Selection Drag Lock, V31 round-trip,
+V30 Explorer Mobile + Panel Lock, V29 Show Grid e assets Nordic.

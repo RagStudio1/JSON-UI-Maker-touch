@@ -22,9 +22,9 @@
 
     if (window.__RAG_JSON_UI_PATCH_V11__) return;
     window.__RAG_JSON_UI_PATCH_V11__ = true;
-    window.__RAG_TOUCH_PATCH_BUILD__ = "v33-readable-texture-fallbacks";
+    window.__RAG_TOUCH_PATCH_BUILD__ = "v34-compound-button-import";
 
-    const BUILD = "v33-readable-texture-fallbacks";
+    const BUILD = "v34-compound-button-import";
     const DRAG_THRESHOLD = 6;
     const COMPAT_MOUSE_BLOCK_MS = 850;
 
@@ -1604,6 +1604,112 @@
     }
 
     // ============================================================
+    // Compound buttons: sane initial size + correctly centred label
+    // ============================================================
+
+    function buttonLabelIsCentered(instance, tolerance = 8) {
+        const label = instance?.displayText?.label;
+        if (!label) return false;
+
+        const buttonWidth =
+            parseFloat(instance.button.style.width) ||
+            instance.button.getBoundingClientRect().width;
+        const buttonHeight =
+            parseFloat(instance.button.style.height) ||
+            instance.button.getBoundingClientRect().height;
+        const labelWidth =
+            parseFloat(label.style.width) ||
+            label.getBoundingClientRect().width;
+        const labelHeight =
+            parseFloat(label.style.height) ||
+            label.getBoundingClientRect().height;
+        const left = parseFloat(label.style.left) || 0;
+        const top = parseFloat(label.style.top) || 0;
+
+        return (
+            Math.abs(left - (buttonWidth - labelWidth) / 2) <= tolerance &&
+            Math.abs(top - (buttonHeight - labelHeight) / 2) <= tolerance
+        );
+    }
+
+    function centerButtonLabel(instance) {
+        const labelInstance = instance?.displayText;
+        const label = labelInstance?.label;
+        if (!label) return;
+
+        labelInstance.updateSize(false);
+
+        const buttonWidth =
+            parseFloat(instance.button.style.width) ||
+            instance.button.getBoundingClientRect().width;
+        const buttonHeight =
+            parseFloat(instance.button.style.height) ||
+            instance.button.getBoundingClientRect().height;
+        const labelWidth =
+            parseFloat(label.style.width) ||
+            label.getBoundingClientRect().width;
+        const labelHeight =
+            parseFloat(label.style.height) ||
+            label.getBoundingClientRect().height;
+
+        label.style.left = `${(buttonWidth - labelWidth) / 2}px`;
+        label.style.top = `${(buttonHeight - labelHeight) / 2}px`;
+        labelInstance.updateSize(false);
+    }
+
+    function patchCompoundButtons(mods) {
+        const Button = mods.DraggableButton;
+        if (Button.prototype.__ragV34CompoundButton) return;
+        Button.prototype.__ragV34CompoundButton = true;
+
+        const originalDrawImage = Button.prototype.drawImage;
+        const originalSetDisplayText = Button.prototype.setDisplayText;
+
+        Button.prototype.drawImage = function (
+            width,
+            height,
+            imageDataState = this.imageDataDefault,
+            updateImage = false
+        ) {
+            const keepLabelCentered = buttonLabelIsCentered(this);
+
+            // The upstream constructor enlarges every texture to 80% of its
+            // parent. Small button PNGs therefore become enormous. Keep their
+            // intrinsic size and only shrink when they do not fit.
+            if (updateImage && imageDataState?.png) {
+                const imageWidth = Math.max(1, imageDataState.png.width || 1);
+                const imageHeight = Math.max(1, imageDataState.png.height || 1);
+                const scale = Math.min(
+                    1,
+                    Math.max(1, width) / imageWidth,
+                    Math.max(1, height) / imageHeight
+                );
+
+                width = imageWidth * scale;
+                height = imageHeight * scale;
+                updateImage = false;
+            }
+
+            const result = originalDrawImage.call(
+                this,
+                Math.max(1, width),
+                Math.max(1, height),
+                imageDataState,
+                updateImage
+            );
+
+            if (keepLabelCentered) centerButtonLabel(this);
+            return result;
+        };
+
+        Button.prototype.setDisplayText = function (text) {
+            const result = originalSetDisplayText.call(this, text);
+            centerButtonLabel(this);
+            return result;
+        };
+    }
+
+    // ============================================================
     // Texture resolver - lazy, on demand
     // ============================================================
 
@@ -1705,7 +1811,7 @@
     }
 
     function decorateMissingTexture(instance, requested, state) {
-        const holder = instance?.canvasHolder;
+        const holder = instance?.canvasHolder || instance?.button;
         if (!(holder instanceof HTMLElement)) return;
 
         holder
@@ -2364,6 +2470,120 @@
             : "";
     }
 
+    function expandedExternalControl(rawKey, rawValue) {
+        const { ref } = splitControlKey(rawKey);
+        const local =
+            rawValue && typeof rawValue === "object"
+                ? rawValue
+                : {};
+
+        if (!ref) return local;
+
+        const base = localDefinition(ref);
+        return base ? merge(base, local) : local;
+    }
+
+    function firstExternalTexture(value, vars, depth = 0) {
+        if (!value || typeof value !== "object" || depth > 8) return "";
+
+        const localVars = variables(value, vars);
+        const candidates = [
+            value.texture,
+            value.$button_texture,
+            value.$default_button_texture,
+            value.$default_button_background_texture,
+        ];
+
+        for (const candidate of candidates) {
+            const resolved = resolveVariable(candidate, localVars);
+            if (typeof resolved === "string" && resolved && !resolved.startsWith("#")) {
+                return normalizeTexture(resolved);
+            }
+        }
+
+        for (const entry of value.controls || []) {
+            for (const [key, child] of Object.entries(entry || {})) {
+                const found = firstExternalTexture(
+                    expandedExternalControl(key, child),
+                    localVars,
+                    depth + 1
+                );
+                if (found) return found;
+            }
+        }
+
+        return "";
+    }
+
+    function externalButtonTexture(json, vars, state) {
+        const directKeys =
+            state === "default"
+                ? [
+                    "$default_button_background_texture",
+                    "$default_button_texture",
+                    "$button_texture",
+                    "texture",
+                ]
+                : state === "hover"
+                ? [
+                    "$hover_button_background_texture",
+                    "$hover_button_texture",
+                ]
+                : [
+                    "$pressed_button_background_texture",
+                    "$pressed_button_texture",
+                ];
+
+        for (const key of directKeys) {
+            const resolved = resolveVariable(json[key], vars);
+            if (typeof resolved === "string" && resolved && !resolved.startsWith("#")) {
+                return normalizeTexture(resolved);
+            }
+        }
+
+        const configuredName = resolveVariable(
+            json[`${state}_control`],
+            vars
+        );
+
+        for (const entry of json.controls || []) {
+            for (const [key, child] of Object.entries(entry || {})) {
+                const { name } = splitControlKey(key);
+                const lower = name.toLowerCase();
+                const matches =
+                    (configuredName && name === configuredName) ||
+                    (state === "default" && /default|normal|idle/.test(lower)) ||
+                    (state === "hover" && /hover|focused/.test(lower)) ||
+                    (state === "pressed" && /press|clicked/.test(lower));
+
+                if (!matches) continue;
+
+                const found = firstExternalTexture(
+                    expandedExternalControl(key, child),
+                    vars
+                );
+                if (found) return found;
+            }
+        }
+
+        return "";
+    }
+
+    function externalButtonText(json, vars) {
+        const value = resolveVariable(
+            json.$button_text ?? json.text,
+            vars
+        );
+
+        return (
+            typeof value === "string" &&
+            value &&
+            !value.startsWith("#")
+        )
+            ? value
+            : "Label";
+    }
+
     async function createExternalControl(
         parentClass,
         rawKey,
@@ -2390,7 +2610,59 @@
         let instance;
         const parent = parentClass.getMainHTMLElement();
 
-        if (type === "image") {
+        if (type === "button") {
+            const requestedDefault =
+                externalButtonTexture(json, vars, "default") ||
+                "assets/placeholder";
+            const requestedHover =
+                externalButtonTexture(json, vars, "hover") ||
+                requestedDefault;
+            const requestedPressed =
+                externalButtonTexture(json, vars, "pressed") ||
+                requestedHover;
+
+            const [defaultState, hoverState, pressedState] =
+                await Promise.all([
+                    ensureTexture(requestedDefault),
+                    ensureTexture(requestedHover),
+                    ensureTexture(requestedPressed),
+                ]);
+
+            const id = newId();
+            instance = new mods.DraggableButton(id, parent, {
+                buttonText: externalButtonText(json, vars),
+                defaultTexture: requestedDefault,
+                hoverTexture: requestedHover,
+                pressedTexture: requestedPressed,
+                collectionIndex: String(
+                    resolveVariable(json.collection_index, vars) ?? "0"
+                ),
+            });
+
+            mods.index.GLOBAL_ELEMENT_MAP.set(id, instance);
+
+            const box = geometry(
+                instance.button,
+                json,
+                vars,
+                parent,
+                mods,
+                [100, 40]
+            );
+
+            instance.drawImage(box.width, box.height, defaultState);
+            instance.imageDataDefault = defaultState;
+            instance.imageDataHover = hoverState;
+            instance.imageDataPressed = pressedState;
+            instance.button.dataset.defaultImagePath = requestedDefault;
+            instance.button.dataset.hoverImagePath = requestedHover;
+            instance.button.dataset.pressedImagePath = requestedPressed;
+            instance.button.dataset.ragCompoundButton = "true";
+            instance.bindings = bindingsString(json);
+            centerButtonLabel(instance);
+
+            decorateMissingTexture(instance, requestedDefault, defaultState);
+        } else if (type === "image") {
             const requested =
                 normalizeTexture(
                     resolveVariable(
@@ -2755,34 +3027,10 @@
         // Preview only default + non-state controls, otherwise all three render
         // on top of each other and make the editor look corrupted.
         if (type === "button") {
-            const defaultName =
-                resolveVariable(
-                    json.default_control,
-                    vars
-                ) || "default";
-
-            const hiddenStates = new Set([
-                String(
-                    resolveVariable(
-                        json.hover_control,
-                        vars
-                    ) || "hover"
-                ),
-                String(
-                    resolveVariable(
-                        json.pressed_control,
-                        vars
-                    ) || "pressed"
-                ),
-            ]);
-
-            controls = controls.filter((entry) => {
-                const key =
-                    Object.keys(entry || {})[0] || "";
-
-                if (key === defaultName) return true;
-                return !hiddenStates.has(key);
-            });
+            // A button is one compound editor item. Importing its state trees
+            // as normal children creates duplicate backgrounds, labels and
+            // independent resize handles.
+            controls = [];
         }
 
         const children = [];
@@ -5418,7 +5666,7 @@
             element.dataset.id
         );
 
-        return {
+        const metadata = {
             version: 1,
             dataset: copyRagDataset(element),
             style: {
@@ -5433,6 +5681,35 @@
                     ? instance.isEditable
                     : undefined,
         };
+
+        if (instance instanceof mods.DraggableButton) {
+            const label = instance.displayText?.label;
+            const icon = instance.displayCanvas?.canvasHolder;
+
+            metadata.button = {
+                text: label?.value ?? element.dataset.displayText ?? "Label",
+                labelStyle: label
+                    ? {
+                        left: label.style.left,
+                        top: label.style.top,
+                        fontSize: label.style.fontSize,
+                        fontFamily: label.style.fontFamily,
+                        textAlign: label.style.textAlign,
+                    }
+                    : null,
+                displayTexture: element.dataset.displayImagePath || "",
+                iconStyle: icon
+                    ? {
+                        left: icon.style.left,
+                        top: icon.style.top,
+                        width: icon.style.width,
+                        height: icon.style.height,
+                    }
+                    : null,
+            };
+        }
+
+        return metadata;
     }
 
     function applyRoundTripMetadata(instance, metadata) {
@@ -5483,6 +5760,64 @@
                 element.dataset.ragClipsChildren === "true"
                     ? "hidden"
                     : "visible";
+        }
+
+        const ButtonClass = window.__RAG_LAST_MODS_V22__?.DraggableButton;
+
+        if (ButtonClass && instance instanceof ButtonClass) {
+            const button = metadata.button || {};
+            const displayTexture =
+                button.displayTexture ?? element.dataset.displayImagePath ?? "";
+
+            if (displayTexture) {
+                instance.setDisplayImage(displayTexture);
+            } else if (instance.displayCanvas) {
+                const child = instance.displayCanvas.getMainHTMLElement?.();
+                const childId = child?.dataset?.id;
+                child?.remove();
+                instance.displayCanvas.outlineDiv?.remove();
+                if (childId) {
+                    window.__RAG_LAST_MODS_V22__.index.GLOBAL_ELEMENT_MAP.delete(childId);
+                }
+                instance.displayCanvas = undefined;
+                element.dataset.displayImagePath = "";
+            }
+
+            if (instance.displayText) {
+                const label = instance.displayText.label;
+                label.value = button.text ?? element.dataset.displayText ?? label.value;
+                element.dataset.displayText = label.value;
+                instance.displayText.updateSize(false);
+
+                for (const key of [
+                    "left",
+                    "top",
+                    "fontSize",
+                    "fontFamily",
+                    "textAlign",
+                ]) {
+                    const value = button.labelStyle?.[key];
+                    if (typeof value === "string" && value) {
+                        label.style[key] = value;
+                    }
+                }
+
+                instance.displayText.updateSize(false);
+            }
+
+            if (instance.displayCanvas && button.iconStyle) {
+                const icon = instance.displayCanvas.canvasHolder;
+                for (const key of ["left", "top"]) {
+                    const value = button.iconStyle[key];
+                    if (typeof value === "string" && value) icon.style[key] = value;
+                }
+
+                const width = parseFloat(button.iconStyle.width);
+                const height = parseFloat(button.iconStyle.height);
+                if (Number.isFinite(width) && Number.isFinite(height)) {
+                    instance.displayCanvas.drawImage(width, height, false);
+                }
+            }
         }
     }
 
@@ -11858,6 +12193,7 @@
         window.__RAG_LAST_MODS_V22__ =
             mods;
 
+        patchCompoundButtons(mods);
         installOriginalPreviewGrid(mods);
 
         await installNordicBuiltinAssets(
